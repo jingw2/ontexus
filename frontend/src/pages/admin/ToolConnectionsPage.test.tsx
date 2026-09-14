@@ -69,7 +69,7 @@ describe('ToolConnectionsPage', () => {
     const connection: ToolConnection = { id: 'c-1', provider_id: 'p-1', status: 'active', active_version_id: null }
     let versions: ToolConnectionVersion[] = [
       { id: 'v-1', connection_id: 'c-1', version_no: 1, endpoint: 'https://search.example.com', audience: null,
-        scopes: ['search:read'], allowlists: {}, approval_status: 'pending' as const,
+        scopes: ['search:read'], allowlists: {}, search_provider: null, approval_status: 'pending' as const,
         health_status: 'unknown' as const, created_by: 'u-1', created_at: '2026-01-01T00:00:00Z' },
     ]
     server.use(

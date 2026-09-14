@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 import type { OntologyStatus } from '@/types/ontology'
+import type { TFunction } from 'i18next'
 
 export interface LifecycleReceipt {
   ontology_id: string
@@ -65,7 +66,7 @@ export const ontologyLifecycleApi = {
     apiClient.get<OntologyReleaseDetail>(`/ontologies/${ontologyId}/releases/${releaseId}`),
 }
 
-export function displayStatus(status: OntologyStatus | string | undefined, t: (key: string, fallback?: string) => string): string {
+export function displayStatus(status: OntologyStatus | string | undefined, t: TFunction): string {
   switch (status) {
     case 'draft': return t('ontology.status_draft', 'Draft')
     case 'creating': return t('ontology.status_creating', 'Creating')

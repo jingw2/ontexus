@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm, type UseFormRegister } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import {
   toolConnectionsApi, PROVIDER_KINDS, LIVE_PROVIDER_KINDS, SEARCH_PROVIDER_PRESETS,
   type ToolProvider, type ToolConnection, type ToolConnectionVersion, type SearchProvider,
@@ -238,7 +239,7 @@ function ConnectionVersionFields({
  * raw endpoint, then the provider kind (e.g. Playwright, which has no
  * endpoint at all) — so two connections of the same kind are never both
  * shown as an indistinguishable opaque id. */
-function connectionLabel(connection: ToolConnection, providerKind: string, t: (key: string, fallback?: string) => string): string {
+function connectionLabel(connection: ToolConnection, providerKind: string, t: TFunction): string {
   if (connection.name) return connection.name
   if (connection.active_version_search_provider) {
     const preset = SEARCH_PROVIDER_PRESETS[connection.active_version_search_provider]
