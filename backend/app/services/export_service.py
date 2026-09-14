@@ -97,7 +97,17 @@ def _ontology_payload(data: dict) -> dict:
             for r in data["logic_rules"]
         ],
         "actions": [
-            {"id": a.id, "name_cn": a.name_cn, "rules": a.rules}
+            {
+                "id": a.id,
+                "name_cn": a.name_cn,
+                "name_en": a.name_en,
+                "description": a.description,
+                "parameters": a.parameters,
+                "rules": a.rules,
+                "submission_criteria": a.submission_criteria,
+                "side_effects": a.side_effects,
+                "confidence": a.confidence,
+            }
             for a in data["actions"]
         ],
     }
