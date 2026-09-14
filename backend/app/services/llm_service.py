@@ -31,7 +31,12 @@ def extract_ontology(text: str, prompt_content: str, model_config: dict, model_n
             "每条关系的 source/target 必须取自已提取的实体\n"
             "5. 逻辑规则按 Palantir Ontology Functions 模型分类为 derived_property/aggregation/"
             "complex_edit/external_query 之一，写入 function_type + definition 字段，禁止输出 "
-            "IF-THEN 自然语言公式\n\n"
+            "IF-THEN 自然语言公式\n"
+            "6. 业务规则、政策、判断条件、定价/审批/校验类规则（如\"促销定价规则\"）不是实体，"
+            "禁止作为 entity 或 instance 输出，必须放入 logic_rules 数组\n"
+            "7. 属性的枚举值/分级/分档/阶段标签（如信用分层的\"A层\"\"B层\"、逾期阶段的\"M0\"\"M1\"、"
+            "融资轮次的\"A轮融资\"）不是独立概念也不是命名实例，不要为它们创建 entity 或 instance，"
+            "只需体现为所属概念某个属性的枚举值\n\n"
             f"文档内容：\n\n{text}"
         )},
     ]
@@ -61,7 +66,7 @@ def normalize_extracted_ontology(parsed: Any) -> dict:
         if not isinstance(entity, dict):
             continue
         name = _clean_entity_name(entity.get("name_cn"))
-        if not name or _is_junk_entity_name(name):
+        if not name or _is_junk_entity_name(name) or _looks_like_rule_name(name) or _looks_like_enum_value(name):
             continue
         key = _normalize_name(name)
         canonical = seen_names.get(key)
@@ -138,6 +143,28 @@ def _is_junk_entity_name(name: str) -> bool:
     if re.search(r"(?:^|/)[^/\s]+\.(?:md|docx?|csv|xlsx?|pdf|pptx?|json|txt)$", name, re.IGNORECASE):
         return True
     return False
+
+
+_RULE_NAME_SUFFIXES = ("规则", "政策", "办法", "制度", "准则", "细则", "规程")
+
+
+def _looks_like_rule_name(name: str) -> bool:
+    """A business rule/policy (e.g. "促销定价规则") is not an entity — it
+    belongs in logic_rules, not the concept graph."""
+    return name.endswith(_RULE_NAME_SUFFIXES)
+
+
+# A letter (+ optional 1-2 digits) followed by a small closed set of
+# tier/stage/round markers, and nothing else — the shape of an enumeration
+# VALUE of some concept's property (信用分层's "A层", 逾期阶段's "M0"/"M1+",
+# 融资轮次's "D轮融资"), not a concept in its own right.
+_ENUM_VALUE_PATTERN = re.compile(
+    r"^[A-Za-z]{1,2}[+-]?(轮融资|阶段|层|级|档|类)$|^M\d{1,2}\+?(阶段)?$"
+)
+
+
+def _looks_like_enum_value(name: str) -> bool:
+    return bool(_ENUM_VALUE_PATTERN.match(name))
 
 
 def resolve_entities(entities: list[dict], model_config: dict, model_name: str) -> dict[str, str]:

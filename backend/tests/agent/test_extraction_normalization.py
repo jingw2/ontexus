@@ -15,6 +15,8 @@ import pytest
 
 from app.services.llm_service import (
     VAGUE_RELATION_TYPES,
+    _looks_like_enum_value,
+    _looks_like_rule_name,
     apply_entity_resolution,
     extract_ontology,
     normalize_extracted_ontology,
@@ -39,7 +41,10 @@ def test_extraction_discipline_red_contract():
 def test_normalization_dedups_and_drops_junk_over_test_data_document():
     """A noisy extraction over the real 信贷 strategy document is normalized:
     duplicate surface forms merge, junk entities vanish, dangling and vague
-    relations are dropped, hierarchy relations survive."""
+    relations are dropped, hierarchy relations survive. Enum-value labels
+    (tier/stage/round markers) and business-rule names are also entity
+    leakage — dropped, along with any relation left dangling by their
+    removal."""
     document = TEST_DATA / "信贷" / "信贷业务战略.md"
     if not document.exists():
         pytest.skip("test_data document unavailable")
@@ -54,6 +59,7 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
             {"name_cn": "A层", "type": "Category", "description": "优质客户", "properties": {}},
             {"name_cn": "B层", "type": "Category", "description": "良好客户", "properties": {}},
             {"name_cn": "授信额度", "type": "Concept", "description": "可贷上限", "properties": {}},
+            {"name_cn": "促销定价规则", "type": "Concept", "description": "误提取的规则", "properties": {}},
             {"name_cn": "12345", "type": "Concept", "description": "噪音", "properties": {}},
             {"name_cn": "", "type": "Concept", "description": "空名", "properties": {}},
             {"name_cn": "信贷业务战略.md", "type": "Concept", "description": "文件名", "properties": {}},
@@ -85,6 +91,11 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
     # junk entities dropped
     assert "12345" not in names
     assert "信贷业务战略.md" not in names
+    # enum-value labels (tier markers) are not concepts — dropped
+    assert "A层" not in names
+    assert "B层" not in names
+    # a business rule is not an entity — dropped (belongs in logic_rules)
+    assert "促销定价规则" not in names
     assert not any(not (e.get("name_cn") or "").strip() for e in normalized["entities"])
     # every surviving entity carries a grounded one-line description
     assert all(e.get("description") for e in normalized["entities"])
@@ -97,10 +108,31 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
     assert ("借款人", "DEPENDS_ON", "信用评分") in triples
     # the duplicate DEPENDS_ON appeared twice -> deduplicated to one
     assert sum(1 for r in normalized["relations"] if r["type"] == "DEPENDS_ON") == 1
-    # hierarchy relations (IS-A / INSTANCE-OF) survive intact
-    assert ("A层", "INSTANCE-OF", "信用分层") in triples
-    assert ("B层", "INSTANCE-OF", "信用分层") in triples
-    assert ("A层", "GOVERNED_BY", "授信额度") in triples
+    # relations pointing at the dropped enum-value entities are now dangling
+    # references and are dropped too
+    assert ("A层", "INSTANCE-OF", "信用分层") not in triples
+    assert ("B层", "INSTANCE-OF", "信用分层") not in triples
+    assert ("A层", "GOVERNED_BY", "授信额度") not in triples
+
+
+def test_looks_like_enum_value_matches_tier_stage_and_round_labels():
+    for name in ("A层", "B层", "C级", "M0", "M1", "M2+", "M0阶段", "A轮融资", "D轮融资", "A档", "B类"):
+        assert _looks_like_enum_value(name), name
+
+
+def test_looks_like_enum_value_does_not_match_real_concepts():
+    for name in ("借款人", "供应商", "A股", "P7", "信用分层", "授信额度", "D轮"):
+        assert not _looks_like_enum_value(name), name
+
+
+def test_looks_like_rule_name_matches_policy_and_rule_suffixes():
+    for name in ("促销定价规则", "审批超时规则", "员工考勤制度", "风险准入政策"):
+        assert _looks_like_rule_name(name), name
+
+
+def test_looks_like_rule_name_does_not_match_concepts():
+    for name in ("借款人", "信用分层", "贷款产品"):
+        assert not _looks_like_rule_name(name), name
 
 
 def test_normalization_is_idempotent_and_keeps_clean_output():

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from evals.document_extraction.validators import keyword_recall, dedup_gate, instance_leakage_gate
+from evals.document_extraction.validators import keyword_recall, dedup_gate, instance_leakage_gate, rule_leakage_gate
 
 SAMPLE_RESULT = {
     "entities": [
@@ -101,3 +101,43 @@ def test_instance_leakage_gate_clean_for_concept_names():
         "relations": [], "logic_rules": [], "actions": [], "instances": [],
     }
     assert instance_leakage_gate(result) == []
+
+
+def test_instance_leakage_gate_flags_enum_value_entity_names():
+    result = {
+        "entities": [
+            {"name_cn": "信用分层", "description": "概念实体"},
+            {"name_cn": "A层", "description": "leaked enum value"},
+            {"name_cn": "M2+", "description": "leaked enum value"},
+            {"name_cn": "D轮融资", "description": "leaked enum value"},
+        ],
+        "relations": [], "logic_rules": [], "actions": [], "instances": [],
+    }
+    findings = instance_leakage_gate(result)
+    flagged_names = {f["name"] for f in findings}
+    assert flagged_names == {"A层", "M2+", "D轮融资"}
+
+
+def test_rule_leakage_gate_flags_business_rule_entity_names():
+    result = {
+        "entities": [
+            {"name_cn": "借款人", "description": "概念实体"},
+            {"name_cn": "促销定价规则", "description": "leaked business rule"},
+            {"name_cn": "风险准入政策", "description": "leaked business rule"},
+        ],
+        "relations": [], "logic_rules": [], "actions": [], "instances": [],
+    }
+    findings = rule_leakage_gate(result)
+    flagged_names = {f["name"] for f in findings}
+    assert flagged_names == {"促销定价规则", "风险准入政策"}
+
+
+def test_rule_leakage_gate_clean_for_concept_names():
+    result = {
+        "entities": [
+            {"name_cn": "借款人", "description": "概念实体"},
+            {"name_cn": "信用分层", "description": "概念实体"},
+        ],
+        "relations": [], "logic_rules": [], "actions": [], "instances": [],
+    }
+    assert rule_leakage_gate(result) == []

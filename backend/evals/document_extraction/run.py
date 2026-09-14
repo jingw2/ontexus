@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 
-from evals.document_extraction.validators import dedup_gate, instance_leakage_gate, keyword_recall
+from evals.document_extraction.validators import dedup_gate, instance_leakage_gate, keyword_recall, rule_leakage_gate
 
 
 def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str) -> dict:
@@ -26,6 +26,7 @@ def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str)
                 "keyword_recall": keyword_recall(ground_truth, extraction_result),
                 "dedup_findings": dedup_gate(extraction_result),
                 "leakage_findings": instance_leakage_gate(extraction_result),
+                "rule_leakage_findings": rule_leakage_gate(extraction_result),
             }
         except Exception as e:
             case_entry = {
@@ -46,6 +47,7 @@ def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str)
         "mean_keyword_recall": mean_recall,
         "cases_with_dedup_findings": sum(1 for c in case_results if c.get("dedup_findings")),
         "cases_with_leakage_findings": sum(1 for c in case_results if c.get("leakage_findings")),
+        "cases_with_rule_leakage_findings": sum(1 for c in case_results if c.get("rule_leakage_findings")),
     }
     return {"cases": case_results, "summary": summary}
 
