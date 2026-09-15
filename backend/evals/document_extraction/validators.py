@@ -55,6 +55,51 @@ def keyword_recall(ground_truth: list[dict], extraction_result: dict) -> dict:
     return {"score": score, "passed": passed, "failed": failed}
 
 
+def precision_recall(gold_entities: list[str], extraction_result: dict, fuzzy_threshold: int = 85) -> dict:
+    """Real precision/recall/F1 against a full gold-labeled entity list (not
+    keyword_recall's loose "does this keyword appear somewhere" check).
+    Fuzzy-matched (rapidfuzz, same threshold convention as dedup_gate) so a
+    minor surface-form difference between the gold name and the extracted
+    name_cn doesn't count as a miss — each gold entity and each extracted
+    entity is consumed by at most one match, so duplicates on either side
+    can't inflate the score."""
+    extracted_names = [
+        str(item.get("name_cn") or "") for item in (extraction_result.get("entities") or [])
+        if isinstance(item, dict) and item.get("name_cn")
+    ]
+    unmatched_extracted = list(extracted_names)
+    matched_gold: list[str] = []
+    missed_gold: list[str] = []
+    for gold_name in gold_entities:
+        best_idx, best_score = None, -1
+        for idx, candidate in enumerate(unmatched_extracted):
+            score = fuzz.ratio(gold_name, candidate)
+            if score > best_score:
+                best_idx, best_score = idx, score
+        if best_idx is not None and best_score >= fuzzy_threshold:
+            matched_gold.append(gold_name)
+            unmatched_extracted.pop(best_idx)
+        else:
+            missed_gold.append(gold_name)
+
+    true_positive = len(matched_gold)
+    false_negative = len(missed_gold)
+    false_positive = len(unmatched_extracted)  # extracted but never matched a gold entity
+    precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) else 1.0
+    recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) else 1.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "precision": round(precision, 3),
+        "recall": round(recall, 3),
+        "f1": round(f1, 3),
+        "true_positive": true_positive,
+        "false_positive": false_positive,
+        "false_negative": false_negative,
+        "missed_gold_entities": missed_gold,
+        "unmatched_extracted_entities": unmatched_extracted,
+    }
+
+
 def dedup_gate(extraction_result: dict, threshold: int = 85) -> list[dict]:
     findings: list[dict] = []
     for category in ("entities", "logic_rules", "actions"):

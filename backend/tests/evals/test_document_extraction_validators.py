@@ -3,7 +3,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from evals.document_extraction.validators import keyword_recall, dedup_gate, instance_leakage_gate, rule_leakage_gate
+from evals.document_extraction.validators import (
+    keyword_recall, dedup_gate, instance_leakage_gate, rule_leakage_gate, precision_recall,
+)
 
 SAMPLE_RESULT = {
     "entities": [
@@ -141,3 +143,61 @@ def test_rule_leakage_gate_clean_for_concept_names():
         "relations": [], "logic_rules": [], "actions": [], "instances": [],
     }
     assert rule_leakage_gate(result) == []
+
+
+def test_precision_recall_perfect_match():
+    gold = ["借款人", "信用分层"]
+    result = {"entities": [{"name_cn": "借款人"}, {"name_cn": "信用分层"}]}
+    pr = precision_recall(gold, result)
+    assert pr["precision"] == 1.0
+    assert pr["recall"] == 1.0
+    assert pr["f1"] == 1.0
+    assert pr["false_positive"] == 0
+    assert pr["false_negative"] == 0
+
+
+def test_precision_recall_counts_extra_extracted_entities_as_false_positives():
+    gold = ["借款人"]
+    result = {"entities": [{"name_cn": "借款人"}, {"name_cn": "促销定价规则"}]}
+    pr = precision_recall(gold, result)
+    assert pr["true_positive"] == 1
+    assert pr["false_positive"] == 1
+    assert pr["recall"] == 1.0
+    assert pr["precision"] == 0.5
+    assert pr["unmatched_extracted_entities"] == ["促销定价规则"]
+
+
+def test_precision_recall_counts_missing_gold_entities_as_false_negatives():
+    gold = ["借款人", "授信额度"]
+    result = {"entities": [{"name_cn": "借款人"}]}
+    pr = precision_recall(gold, result)
+    assert pr["true_positive"] == 1
+    assert pr["false_negative"] == 1
+    assert pr["precision"] == 1.0
+    assert pr["recall"] == 0.5
+    assert pr["missed_gold_entities"] == ["授信额度"]
+
+
+def test_precision_recall_fuzzy_matches_minor_surface_form_differences():
+    gold = ["产品研发部"]
+    result = {"entities": [{"name_cn": "产品研发部门"}]}
+    pr = precision_recall(gold, result)
+    assert pr["true_positive"] == 1
+    assert pr["missed_gold_entities"] == []
+
+
+def test_precision_recall_does_not_double_count_one_extracted_entity_for_two_gold_entities():
+    """Each extracted entity can satisfy at most one gold entity — a single
+    lucky match must not inflate recall for an unrelated second gold entity."""
+    gold = ["借款人", "还款人"]
+    result = {"entities": [{"name_cn": "借款人"}]}
+    pr = precision_recall(gold, result)
+    assert pr["true_positive"] == 1
+    assert pr["false_negative"] == 1
+
+
+def test_precision_recall_empty_gold_is_perfect_precision_no_recall_penalty():
+    pr = precision_recall([], {"entities": [{"name_cn": "任意实体"}]})
+    assert pr["recall"] == 1.0  # nothing was required
+    assert pr["false_positive"] == 1
+    assert pr["precision"] == 0.0

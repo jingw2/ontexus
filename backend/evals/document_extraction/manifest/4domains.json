@@ -1,0 +1,6 @@
+[
+  {"case_id": "credit-01", "domain": "信贷", "source_file": "test_data/信贷/信贷业务战略.md", "ground_truth_id": "信贷"},
+  {"case_id": "supply-chain-01", "domain": "供应链", "source_file": "test_data/供应链/supply_chain_strategy.md", "ground_truth_id": "供应链"},
+  {"case_id": "medical-01", "domain": "医疗", "source_file": "test_data/医疗/clinical_protocols.md", "ground_truth_id": "医疗"},
+  {"case_id": "finance-01", "domain": "财务", "source_file": "test_data/财务/financial_controls.md", "ground_truth_id": "财务"}
+]

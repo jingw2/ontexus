@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 
-from evals.document_extraction.validators import dedup_gate, instance_leakage_gate, keyword_recall, rule_leakage_gate
+from evals.document_extraction.validators import (
+    dedup_gate, instance_leakage_gate, keyword_recall, precision_recall, rule_leakage_gate,
+)
 
 
 def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str) -> dict:
@@ -17,6 +19,15 @@ def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str)
         with open(gt_path, encoding="utf-8") as f:
             ground_truth = json.load(f)
 
+        # optional: a full gold entity list for real precision/recall/F1,
+        # separate from the keyword-hint ground_truth above — a domain
+        # without this file simply skips precision/recall, no breakage
+        entities_gt_path = os.path.join(ground_truth_dir, f"{case['ground_truth_id']}.entities.json")
+        gold_entities = None
+        if os.path.exists(entities_gt_path):
+            with open(entities_gt_path, encoding="utf-8") as f:
+                gold_entities = json.load(f)
+
         source_path = os.path.join(repo_root, case["source_file"])
         try:
             extraction_result = adapter.extract(source_path)
@@ -28,6 +39,8 @@ def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str)
                 "leakage_findings": instance_leakage_gate(extraction_result),
                 "rule_leakage_findings": rule_leakage_gate(extraction_result),
             }
+            if gold_entities is not None:
+                case_entry["precision_recall"] = precision_recall(gold_entities, extraction_result)
         except Exception as e:
             case_entry = {
                 "case_id": case["case_id"],
@@ -42,12 +55,16 @@ def run_eval(manifest_path: str, ground_truth_dir: str, adapter, repo_root: str)
         sum(c["keyword_recall"]["score"] for c in recall_cases) / len(recall_cases)
         if recall_cases else 0.0
     )
+    pr_cases = [c for c in case_results if "precision_recall" in c]
+    mean_f1 = sum(c["precision_recall"]["f1"] for c in pr_cases) / len(pr_cases) if pr_cases else None
     summary = {
         "total_cases": total,
         "mean_keyword_recall": mean_recall,
         "cases_with_dedup_findings": sum(1 for c in case_results if c.get("dedup_findings")),
         "cases_with_leakage_findings": sum(1 for c in case_results if c.get("leakage_findings")),
         "cases_with_rule_leakage_findings": sum(1 for c in case_results if c.get("rule_leakage_findings")),
+        "cases_with_precision_recall": len(pr_cases),
+        "mean_f1": mean_f1,
     }
     return {"cases": case_results, "summary": summary}
 
