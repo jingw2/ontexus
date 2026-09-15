@@ -4,6 +4,7 @@ A simple-LLM ontology over a tabular (CSV) test_data file must end up with
 instance data attached to its concept entities (row_identity + row_data),
 consistent with Pipeline/Mapping output — not just Entity/Relation rows.
 """
+import json
 import os
 import subprocess
 import sys
@@ -235,5 +236,49 @@ def test_simple_llm_without_instances_still_succeeds(schema, monkeypatch):
         assert session.execute(text(
             "SELECT count(*) FROM entity_instances WHERE ontology_id = 'o-llm'"
         )).scalar_one() == 0
+    finally:
+        session.close()
+
+
+def test_dangling_linked_entities_reference_is_dropped(schema, monkeypatch):
+    """A logic_rule/action whose linked_entities names a rule-category label
+    (e.g. "反欺诈规则") rather than a real concept entity must not carry that
+    dangling reference into the saved row — the same discipline already
+    applied to relations pointing at an entity the model never extracted."""
+    factory, session = _worker(schema)
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+    monkeypatch.setattr(
+        "app.services.llm_service.extract_ontology",
+        lambda *a, **k: {
+            "entities": [{"name_cn": "设备指纹", "type": "Concept", "description": "设备指纹特征", "properties": {}}],
+            "relations": [],
+            "logic_rules": [
+                {"name_cn": "设备指纹黑名单拒绝", "function_type": "derived_property", "definition": "命中黑名单则拒绝",
+                 "linked_entities": ["设备指纹", "反欺诈规则"]},
+            ],
+            "actions": [
+                {"name_cn": "标记欺诈", "rules": [], "linked_entities": ["设备指纹", "反欺诈规则"]},
+            ],
+        },
+    )
+    extraction_task.run_extraction(task_id)
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+        def _as_list(value):
+            return json.loads(value) if isinstance(value, str) else value
+
+        rule_linked = _as_list(session.execute(text(
+            "SELECT linked_entities FROM logic_rules WHERE ontology_id = 'o-llm' AND name_cn = '设备指纹黑名单拒绝'"
+        )).scalar_one())
+        assert rule_linked == ["设备指纹"]
+        action_linked = _as_list(session.execute(text(
+            "SELECT linked_entities FROM actions WHERE ontology_id = 'o-llm' AND name_cn = '标记欺诈'"
+        )).scalar_one())
+        assert action_linked == ["设备指纹"]
     finally:
         session.close()

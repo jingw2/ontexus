@@ -592,6 +592,12 @@ def run_extraction(self, task_id: str):
             if not llm_linked:
                 combined = " ".join(filter(None, [name_cn, r_data.get("definition",""), r_data.get("description","")]))
                 llm_linked = _match_entities(combined, all_entity_names)
+            # A rule-category label (e.g. "反欺诈规则") is not a concept entity —
+            # it belongs in logic_rules, not entities — so a linked_entities
+            # reference to one is a dangling reference, same as a relation
+            # pointing at an entity the model never extracted; drop it rather
+            # than let it surface as a broken-reference validation warning.
+            llm_linked = [n for n in llm_linked if n in entity_name_to_id]
 
             if name_cn in existing_rule_map:
                 rule = existing_rule_map[name_cn]
@@ -631,6 +637,9 @@ def run_extraction(self, task_id: str):
             if not linked_ents:
                 combined = " ".join(filter(None, [name_cn, a_data.get("description","")]))
                 linked_ents = _match_entities(combined, all_entity_names)
+            # Same dangling-reference cleanup as logic_rules above — a
+            # rule-category label is not a concept entity.
+            linked_ents = [n for n in linked_ents if n in entity_name_to_id]
 
             linked_logic_names = a_data.get("linked_logic_names", [])
             linked_ids = [logic_name_to_id[n] for n in linked_logic_names if n in logic_name_to_id]
