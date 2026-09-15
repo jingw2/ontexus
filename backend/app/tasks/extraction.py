@@ -1,6 +1,7 @@
 from app.tasks.celery_app import celery_app
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,48 @@ def _fuzzy_resolve_entity(name: str, name_to_id: dict) -> str | None:
     return candidates[0][1]
 
 
+# ── Long-document chunking (graph-engineering playbook, scaling guidance) ───
+_CHUNK_MAX_CHARS = 12000
+_CHUNK_OVERLAP_CHARS = 500
+_SECTION_HEADER = re.compile(r"^#{1,3}\s+.*$", re.MULTILINE)
+
+
+def _split_sections(md: str) -> list[str]:
+    """Split markdown into section chunks at heading boundaries. Falls back to
+    paragraph boundaries when the document has no headings at all."""
+    starts = [m.start() for m in _SECTION_HEADER.finditer(md)]
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    if len(starts) > 1:
+        return [md[s:e] for s, e in zip(starts, starts[1:] + [len(md)]) if md[s:e].strip()]
+    return [p for p in md.split("\n\n") if p.strip()]
+
+
+def _chunk_document(md: str, max_chars: int = _CHUNK_MAX_CHARS, overlap_chars: int = _CHUNK_OVERLAP_CHARS) -> list[str]:
+    """Chunk a long document at section boundaries so a single extraction call
+    never has to hold the whole thing — entities/relations still land within
+    the same chunk as their context. Each chunk after the first repeats the
+    tail of the previous chunk as overlap, so a concept mentioned at a section
+    boundary isn't split from the relations described just after it. Short
+    documents (the common case) pass through unchanged as a single chunk."""
+    if len(md) <= max_chars:
+        return [md]
+
+    sections = _split_sections(md)
+    chunks: list[str] = []
+    current = ""
+    for section in sections:
+        if current and len(current) + len(section) > max_chars:
+            chunks.append(current)
+            overlap = current[-overlap_chars:] if overlap_chars > 0 else ""
+            current = overlap + section
+        else:
+            current += section
+    if current.strip():
+        chunks.append(current)
+    return chunks or [md]
+
+
 @celery_app.task(bind=True)
 def run_extraction(self, task_id: str):
     import app.models  # noqa: F401 — register all tables for FK resolution
@@ -317,14 +360,19 @@ def run_extraction(self, task_id: str):
         max_workers = 1  # serial extraction to avoid OOM with large LLM payloads
         completed = 0
 
-        task.progress = {"stage": f"extracting files 0/{len(valid_mds)} (parallel ×{max_workers})", "pct": 20}
+        # a long document is chunked at section boundaries first (see
+        # _chunk_document) — most documents are short and pass through as a
+        # single chunk, so this is a no-op for today's typical corpus
+        units = [(f, chunk) for f in valid_mds for chunk in _chunk_document(_clean(f.converted_md or ""))]
+        total_units = len(units)
+
+        task.progress = {"stage": f"extracting files 0/{total_units} (parallel ×{max_workers})", "pct": 20}
         db.commit()
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
-            for f in valid_mds:
-                md = _clean(f.converted_md or "")
-                futures[executor.submit(extract_ontology, md, prompt_content, config_dict, model_name)] = f
+            for f, chunk in units:
+                futures[executor.submit(extract_ontology, chunk, prompt_content, config_dict, model_name)] = f
 
             for future in as_completed(futures):
                 f = futures[future]
@@ -335,7 +383,7 @@ def run_extraction(self, task_id: str):
                 except Exception:
                     logger.exception("extract_ontology failed for file %s", getattr(f, "id", f))
                 completed += 1
-                task.progress = {"stage": f"extracting files {completed}/{len(valid_mds)} (parallel ×{max_workers})", "pct": 20 + 35 * completed // len(valid_mds)}
+                task.progress = {"stage": f"extracting files {completed}/{total_units} (parallel ×{max_workers})", "pct": 20 + 35 * completed // total_units}
                 db.commit()
 
         if all_results:
