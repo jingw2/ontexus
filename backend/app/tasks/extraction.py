@@ -250,6 +250,33 @@ def _fuzzy_resolve_entity(name: str, name_to_id: dict) -> str | None:
     return candidates[0][1]
 
 
+# ── Tiered model selection (graph-engineering playbook, model selection) ────
+# Extraction is high-volume and schema-constrained — speed/cost dominate, so
+# it always uses whatever model the user picked. Resolution and relation
+# inference weigh conflicting evidence — reasoning quality dominates — so
+# when the user picked an explicitly fast/cheap variant, we look for a
+# stronger sibling already configured on the same model config and use that
+# instead. No new user-facing setting: this reads only what's already in
+# ModelConfig.models.
+_FAST_MODEL_HINTS = ("flash", "mini", "haiku", "lite", "turbo", "nano", "fast")
+
+
+def _select_reasoning_model(model_name: str, available_models: list) -> str:
+    """Pick the model to use for judgment-heavy stages (resolution, relation
+    inference). Falls back to `model_name` unchanged unless the user's pick
+    looks like a fast/cheap variant AND a non-fast sibling exists in the same
+    model config — so behavior is identical to today whenever no better
+    candidate is configured."""
+    if not any(hint in model_name.lower() for hint in _FAST_MODEL_HINTS):
+        return model_name
+    for candidate in available_models or []:
+        if isinstance(candidate, str) and candidate != model_name and not any(
+            hint in candidate.lower() for hint in _FAST_MODEL_HINTS
+        ):
+            return candidate
+    return model_name
+
+
 # ── Long-document chunking (graph-engineering playbook, scaling guidance) ───
 _CHUNK_MAX_CHARS = 12000
 _CHUNK_OVERLAP_CHARS = 500
@@ -337,6 +364,12 @@ def run_extraction(self, task_id: str):
             task.status = "failed"; task.error = "Model or prompt not found"; db.commit(); return
 
         model_name = task.parameters.get("model_name", "")
+        # resolution/relation-inference weigh conflicting evidence — use a
+        # stronger sibling model already configured on this model config when
+        # the user picked a fast/cheap variant for extraction (see
+        # _select_reasoning_model); falls back to model_name unchanged
+        # otherwise, so this is a no-op unless a better candidate exists
+        reasoning_model_name = _select_reasoning_model(model_name, model_cfg.models)
         config_dict = {
             "provider": model_cfg.provider,
             "api_key":  decrypt(model_cfg.api_key_encrypted or ""),
@@ -397,7 +430,7 @@ def run_extraction(self, task_id: str):
                 task.progress = {"stage": "resolving entities", "pct": 58}
                 db.commit()
                 from app.services.llm_service import resolve_entities, apply_entity_resolution
-                alias_map = resolve_entities(result["entities"], config_dict, model_name)
+                alias_map = resolve_entities(result["entities"], config_dict, reasoning_model_name)
                 result = apply_entity_resolution(result, alias_map)
         else:
             # 全部失败时回退到合并文本单次提取
@@ -446,7 +479,7 @@ def run_extraction(self, task_id: str):
             db.commit()
             extra_rels = infer_relations(
                 entities_extracted, relations_extracted,
-                combined_text, config_dict, model_name
+                combined_text, config_dict, reasoning_model_name
             )
             if extra_rels:
                 # Accept relations where both endpoints fuzzy-match a known entity name
