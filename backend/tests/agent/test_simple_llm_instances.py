@@ -187,7 +187,7 @@ def test_single_document_near_duplicate_entities_are_resolved(schema, monkeypatc
     )
     monkeypatch.setattr(
         "app.services.llm_service.resolve_entities",
-        lambda entities, config, model_name: {
+        lambda entities, config, model_name, existing_entities=None: {
             "产品研发部": "产品研发部",
             "产品研发部门": "产品研发部",
         },
@@ -280,5 +280,59 @@ def test_dangling_linked_entities_reference_is_dropped(schema, monkeypatch):
             "SELECT linked_entities FROM actions WHERE ontology_id = 'o-llm' AND name_cn = '标记欺诈'"
         )).scalar_one())
         assert action_linked == ["设备指纹"]
+    finally:
+        session.close()
+
+
+def test_rerun_resolves_new_surface_form_against_already_published_entity(schema, monkeypatch):
+    """Incremental-update guidance: re-running extraction on an ontology that
+    already has a published entity must not create a duplicate when the new
+    run's LLM output spells the same concept differently — it should resolve
+    to the existing entity's own name, not the other way around."""
+    factory, session = _worker(schema)
+    task_id_1 = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+
+    monkeypatch.setattr(
+        "app.services.llm_service.extract_ontology",
+        lambda *a, **k: {
+            "entities": [{"name_cn": "客户", "type": "Concept", "description": "贷款客户", "properties": {}}],
+            "relations": [], "logic_rules": [], "actions": [],
+        },
+    )
+    extraction_task.run_extraction(task_id_1)
+
+    task_id_2 = str(uuid.uuid4())
+    session.execute(text(
+        "INSERT INTO extraction_tasks (id, ontology_id, prompt_id, model_id, status, parameters, progress, error, created_at, updated_at) "
+        "VALUES (:id, 'o-llm', 'p-1', 'm-1', 'queued', :params, '{}'::json, NULL, now(), now())"
+    ), {"id": task_id_2, "params": '{"model_name": "mock-extractor", "constraints": []}'})
+    session.commit()
+
+    monkeypatch.setattr(
+        "app.services.llm_service.extract_ontology",
+        lambda *a, **k: {
+            "entities": [{"name_cn": "客户方", "type": "Concept", "description": "本轮换了个写法", "properties": {}}],
+            "relations": [], "logic_rules": [], "actions": [],
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.llm_service._call_llm",
+        lambda *a, **k: '{"clusters": [{"canonical": "客户方", "aliases": ["客户方", "客户"]}]}',
+    )
+    extraction_task.run_extraction(task_id_2)
+
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id_2}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+        names = session.execute(text(
+            "SELECT name_cn FROM entities WHERE ontology_id = 'o-llm'"
+        )).scalars().all()
+        # the model's clustering call picked "客户方" as canonical, but the
+        # already-published "客户" must win — no duplicate, no rename
+        assert names == ["客户"]
     finally:
         session.close()

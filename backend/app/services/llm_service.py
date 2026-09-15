@@ -167,14 +167,25 @@ def _looks_like_enum_value(name: str) -> bool:
     return bool(_ENUM_VALUE_PATTERN.match(name))
 
 
-def resolve_entities(entities: list[dict], model_config: dict, model_name: str) -> dict[str, str]:
+def resolve_entities(
+    entities: list[dict], model_config: dict, model_name: str,
+    existing_entities: list[dict] | None = None,
+) -> dict[str, str]:
     """Cross-document entity resolution (graph-engineering playbook, resolution
     stage): within each entity type, cluster surface-form variants of the same
     real-world concept using the extraction-time descriptions as disambiguation
     context — catches cases exact-name matching misses (abbreviation vs full
     name, alias vs formal name across files).  Returns an alias map
     {raw_name_cn: canonical_name_cn} covering every input name; unmatched names
-    and failed calls fall back to identity so no entity is ever silently lost."""
+    and failed calls fall back to identity so no entity is ever silently lost.
+
+    `existing_entities` (playbook incremental-update guidance: resolve new
+    entities against the existing canonical set, not against each other) are
+    entities already saved on this ontology from a prior run. They are never
+    renamed — if a new entity clusters with one of them, that existing
+    entity's name_cn is forced as the canonical, so re-running extraction
+    never silently relabels an already-published entity out from under its
+    existing relations/instances."""
     alias_map: dict[str, str] = {}
     by_type: dict[str, list[dict]] = {}
     for e in entities:
@@ -184,21 +195,43 @@ def resolve_entities(entities: list[dict], model_config: dict, model_name: str) 
         alias_map[name] = name
         by_type.setdefault(e.get("type") or "", []).append(e)
 
+    existing_by_type: dict[str, list[dict]] = {}
+    existing_names: set[str] = set()
+    for e in existing_entities or []:
+        name = e.get("name_cn")
+        if not name:
+            continue
+        existing_names.add(name)
+        existing_by_type.setdefault(e.get("type") or "", []).append(e)
+
     provider = model_config.get("provider", "openai")
     api_key = model_config.get("api_key", "")
     api_base = model_config.get("api_base")
 
     for etype, group in by_type.items():
-        if len(group) < 2:
+        existing_group = existing_by_type.get(etype, [])
+        if len(group) + len(existing_group) < 2:
             continue
         entity_list = "\n".join(
             f"- {e['name_cn']}: {(e.get('description') or '').strip()[:100]}" for e in group
+        )
+        if existing_group:
+            entity_list += "\n" + "\n".join(
+                f"- [已存在] {e['name_cn']}: {(e.get('description') or '').strip()[:100]}"
+                for e in existing_group
+            )
+        incremental_rule = (
+            "\n标记为 [已存在] 的实体是本体里已经发布的规范实体：如果某个未标记的新实体与其属于"
+            "同一概念，该簇的 canonical 必须使用 [已存在] 实体的名字（去掉标记），绝不能改名或"
+            "另选一个新名字。"
+            if existing_group else ""
         )
         system_prompt = (
             f"你是实体消歧专家。下面是同一类型（{etype or '未分类'}）从文档中提取的实体，"
             "其中部分可能是同一概念的不同写法（如全称/简称、中英文并列、别名）。请聚类："
             "每个输入名称必须出现在且仅出现在一个簇的 aliases 中；确实不同的概念各自单独成簇；"
-            "结合描述判断，不要仅凭字面相似合并不同概念；canonical 取信息最完整、无歧义的写法。\n\n"
+            "结合描述判断，不要仅凭字面相似合并不同概念；canonical 取信息最完整、无歧义的写法。"
+            f"{incremental_rule}\n\n"
             '只返回 JSON：{"clusters": [{"canonical": "规范名", "aliases": ["写法1", "写法2"]}]}'
         )
         messages = [
@@ -210,15 +243,25 @@ def resolve_entities(entities: list[dict], model_config: dict, model_name: str) 
         except Exception:
             continue  # resolution is best-effort; keep identity mapping on failure
         group_names = {e["name_cn"] for e in group}
+        existing_group_names = {e["name_cn"] for e in existing_group}
+        all_names = group_names | existing_group_names
         for cluster in (parsed.get("clusters") or []) if isinstance(parsed, dict) else []:
             if not isinstance(cluster, dict):
                 continue
             canonical = _clean_entity_name(cluster.get("canonical"))
-            if not canonical or canonical not in group_names:
+            aliases = [_clean_entity_name(a) for a in (cluster.get("aliases") or [])]
+            aliases = [a for a in aliases if a and a in all_names]
+            # an existing (already-published) entity in this cluster always
+            # wins the canonical slot, regardless of what the model picked
+            existing_in_cluster = [a for a in aliases if a in existing_group_names] + (
+                [canonical] if canonical in existing_group_names else []
+            )
+            if existing_in_cluster:
+                canonical = existing_in_cluster[0]
+            elif not canonical or canonical not in group_names:
                 continue
-            for alias in cluster.get("aliases") or []:
-                alias = _clean_entity_name(alias)
-                if alias and alias in group_names:
+            for alias in aliases:
+                if alias in group_names:  # only remap names from this run's own entities
                     alias_map[alias] = canonical
     return alias_map
 

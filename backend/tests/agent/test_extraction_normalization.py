@@ -240,6 +240,67 @@ def test_resolve_entities_single_type_member_skips_llm_call():
     assert alias_map == {"唯一实体": "唯一实体"}
 
 
+def test_resolve_entities_anchors_canonical_to_existing_entity():
+    """Incremental-update guidance: a new-run surface form that clusters with
+    an already-published entity must remap to that entity's own name, not to
+    whatever the model picked as canonical."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+
+    def fake_call(provider, api_key, api_base, model, messages):
+        assert "[已存在]" in messages[1]["content"]
+        return '{"clusters": [{"canonical": "客户方", "aliases": ["客户方", "客户"]}]}'
+
+    llm_service._call_llm = fake_call
+    try:
+        new_entities = [{"name_cn": "客户方", "type": "Concept", "description": "本轮新提取"}]
+        existing = [{"name_cn": "客户", "type": "Concept", "description": "已发布的规范实体"}]
+        alias_map = resolve_entities(
+            new_entities, {"provider": "openai", "api_key": "x"}, "m", existing_entities=existing,
+        )
+    finally:
+        llm_service._call_llm = original
+    # the model picked "客户方" as canonical, but the existing entity "客户"
+    # must win regardless
+    assert alias_map["客户方"] == "客户"
+
+
+def test_resolve_entities_single_new_entity_still_checked_against_existing():
+    """A single new entity (which would otherwise skip clustering entirely)
+    must still be checked against existing entities of the same type."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (
+        '{"clusters": [{"canonical": "借款人", "aliases": ["借款方", "借款人"]}]}'
+    )
+    try:
+        alias_map = resolve_entities(
+            [{"name_cn": "借款方", "type": "Concept", "description": "本轮新提取"}],
+            {"provider": "openai", "api_key": "x"}, "m",
+            existing_entities=[{"name_cn": "借款人", "type": "Concept", "description": "已发布"}],
+        )
+    finally:
+        llm_service._call_llm = original
+    assert alias_map["借款方"] == "借款人"
+
+
+def test_resolve_entities_does_not_touch_existing_entities_of_other_types():
+    """Existing entities of a different type never enter the same clustering
+    call — no cross-type contamination."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
+    try:
+        alias_map = resolve_entities(
+            [{"name_cn": "唯一实体", "type": "Concept", "description": "d"}],
+            {"provider": "openai", "api_key": "x"}, "m",
+            existing_entities=[{"name_cn": "供应商甲", "type": "Supplier", "description": "d"}],
+        )
+    finally:
+        llm_service._call_llm = original
+    assert alias_map == {"唯一实体": "唯一实体"}
+
+
 def test_apply_entity_resolution_merges_and_remaps_references():
     """apply_entity_resolution merges aliased entities (keeping the richer
     description), remaps relation endpoints, drops self-loops created by the

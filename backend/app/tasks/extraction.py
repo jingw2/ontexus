@@ -426,11 +426,23 @@ def run_extraction(self, task_id: str):
             # so a concept extracted under different surface forms — whether
             # across files or within one document — would otherwise fracture
             # into separate nodes
-            if len(result.get("entities") or []) > 1:
+            new_entity_count = len(result.get("entities") or [])
+            # incremental-update guidance: resolve this run's new entities
+            # against the ontology's already-published entities too, so a
+            # re-run doesn't create a duplicate for a surface-form variant of
+            # something that already exists
+            existing_entities_for_resolution = [
+                {"name_cn": e.name_cn, "description": e.description, "type": e.type}
+                for e in db.query(Entity).filter(Entity.ontology_id == task.ontology_id).all()
+            ]
+            if new_entity_count > 1 or (new_entity_count == 1 and existing_entities_for_resolution):
                 task.progress = {"stage": "resolving entities", "pct": 58}
                 db.commit()
                 from app.services.llm_service import resolve_entities, apply_entity_resolution
-                alias_map = resolve_entities(result["entities"], config_dict, reasoning_model_name)
+                alias_map = resolve_entities(
+                    result["entities"], config_dict, reasoning_model_name,
+                    existing_entities=existing_entities_for_resolution,
+                )
                 result = apply_entity_resolution(result, alias_map)
         else:
             # 全部失败时回退到合并文本单次提取
