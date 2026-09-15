@@ -771,6 +771,18 @@ def run_extraction(self, task_id: str):
         if project:
             project.status = "created"
 
+        # graph-engineering playbook diagnostics: computed over the ontology's
+        # full saved graph (not just this run's output), so a stale connected-
+        # components count from a prior run never masks today's actual state
+        from app.services.graph_diagnostics import compute_graph_diagnostics
+        final_entities = db.query(Entity).filter(Entity.ontology_id == task.ontology_id).all()
+        final_relations = db.query(Relation).filter(Relation.ontology_id == task.ontology_id).all()
+        graph_diagnostics = compute_graph_diagnostics(
+            [{"id": e.id, "name_cn": e.name_cn} for e in final_entities],
+            [(r.source_entity, r.target_entity) for r in final_relations],
+        )
+        task.validation_report = {**(task.validation_report or {}), "graph_diagnostics": graph_diagnostics}
+
         task.status   = "completed"
         task.progress = {"stage": "done", "pct": 100}
         db.commit()

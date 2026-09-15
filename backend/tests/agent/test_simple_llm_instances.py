@@ -336,3 +336,38 @@ def test_rerun_resolves_new_surface_form_against_already_published_entity(schema
         assert names == ["客户"]
     finally:
         session.close()
+
+
+def test_extraction_task_stores_graph_diagnostics(schema, monkeypatch):
+    """Graph diagnostics (connected components, hub entities) are computed
+    over the ontology's full saved graph and stored on the task's
+    validation_report alongside the existing P0 report."""
+    factory, session = _worker(schema)
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+    monkeypatch.setattr(
+        "app.services.llm_service.extract_ontology",
+        lambda *a, **k: {
+            "entities": [
+                {"name_cn": "借款人", "type": "Concept", "description": "d", "properties": {}},
+                {"name_cn": "贷款", "type": "Concept", "description": "d", "properties": {}},
+                {"name_cn": "孤立实体", "type": "Concept", "description": "d", "properties": {}},
+            ],
+            "relations": [{"source": "借款人", "target": "贷款", "type": "APPLIES_FOR", "confidence": 0.9}],
+            "logic_rules": [], "actions": [],
+        },
+    )
+    extraction_task.run_extraction(task_id)
+    try:
+        report = session.execute(text(
+            "SELECT validation_report FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).scalar_one()
+        diagnostics = json.loads(report)["graph_diagnostics"] if isinstance(report, str) else report["graph_diagnostics"]
+        assert diagnostics["entity_count"] == 3
+        assert diagnostics["edge_count"] == 1
+        assert diagnostics["connected_components"] == 2  # {借款人,贷款} + {孤立实体}
+        assert diagnostics["isolated_entity_count"] == 1
+        assert diagnostics["isolated_entities"] == ["孤立实体"]
+    finally:
+        session.close()
