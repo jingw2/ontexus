@@ -21,6 +21,7 @@ from app.services.llm_service import (
     extract_ontology,
     normalize_extracted_ontology,
     resolve_entities,
+    summarize_entity,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -348,3 +349,46 @@ def test_apply_entity_resolution_is_noop_for_identity_map():
     result = {"entities": [{"name_cn": "A"}], "relations": []}
     assert apply_entity_resolution(result, {"A": "A"}) is result
     assert apply_entity_resolution(result, {}) is result
+
+
+def test_summarize_entity_parses_profile_from_llm_response():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (
+        '{"summary": "借款人是信贷业务的核心概念。", '
+        '"key_facts": ["借款人需通过授信审批", "借款人拥有贷款账户", "多出来的第四条", '
+        '"第五条", "第六条会被截断"], '
+        '"time_range": {"start": "2026", "end": "ongoing"}}'
+    )
+    try:
+        profile = summarize_entity(
+            "借款人", "贷款申请人", "(借款人) --[APPLIES_FOR]--> (贷款)",
+            {"provider": "openai", "api_key": "x"}, "m",
+        )
+    finally:
+        llm_service._call_llm = original
+    assert profile["summary"] == "借款人是信贷业务的核心概念。"
+    assert len(profile["key_facts"]) == 5  # capped at 5
+    assert profile["time_range"] == {"start": "2026", "end": "ongoing"}
+
+
+def test_summarize_entity_returns_none_on_failure():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        profile = summarize_entity("借款人", "d", "", {"provider": "openai", "api_key": "x"}, "m")
+    finally:
+        llm_service._call_llm = original
+    assert profile is None
+
+
+def test_summarize_entity_defaults_missing_time_range_to_unknown():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: '{"summary": "s", "key_facts": []}'
+    try:
+        profile = summarize_entity("X", "d", "", {"provider": "openai", "api_key": "x"}, "m")
+    finally:
+        llm_service._call_llm = original
+    assert profile["time_range"] == {"start": "unknown", "end": "unknown"}

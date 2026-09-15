@@ -540,7 +540,10 @@ def run_extraction(self, task_id: str):
                 ent = existing_ent_map[name_cn]
                 # Always allow LLM to enrich description, properties, name_en, name_abbr
                 if e_data.get("description"): ent.description = e_data["description"]
-                if props:                     ent.properties  = props
+                # merge, don't replace — a prior run's hub summary
+                # (summary/key_facts/summary_degree) must survive a re-run
+                # that doesn't touch this entity's properties otherwise
+                if props:                     ent.properties  = {**(ent.properties or {}), **props}
                 if e_data.get("name_en"):     ent.name_en     = e_data["name_en"]
                 if name_abbr:                 ent.name_abbr   = name_abbr
                 if e_data.get("type"):        ent.type        = e_data["type"]
@@ -782,6 +785,35 @@ def run_extraction(self, task_id: str):
             [(r.source_entity, r.target_entity) for r in final_relations],
         )
         task.validation_report = {**(task.validation_report or {}), "graph_diagnostics": graph_diagnostics}
+
+        # hub-node summarization (playbook Section V.A): only entities with
+        # enough graph connectivity to benefit from cross-relation synthesis;
+        # re-summarizes only when degree changed since the last summary, so a
+        # re-run doesn't re-call the model for an unchanged hub every time
+        _HUB_DEGREE_THRESHOLD = 3
+        degree_by_id: dict = {e.id: 0 for e in final_entities}
+        relation_lines_by_id: dict = {}
+        name_by_id = {e.id: e.name_cn for e in final_entities}
+        for r in final_relations:
+            if r.source_entity in degree_by_id:
+                degree_by_id[r.source_entity] += 1
+            if r.target_entity in degree_by_id:
+                degree_by_id[r.target_entity] += 1
+            line = f"({name_by_id.get(r.source_entity, r.source_entity)}) --[{r.type}]--> ({name_by_id.get(r.target_entity, r.target_entity)})"
+            relation_lines_by_id.setdefault(r.source_entity, []).append(line)
+            relation_lines_by_id.setdefault(r.target_entity, []).append(line)
+
+        from app.services.llm_service import summarize_entity
+        for e in final_entities:
+            degree = degree_by_id.get(e.id, 0)
+            if degree < _HUB_DEGREE_THRESHOLD:
+                continue
+            if (e.properties or {}).get("summary_degree") == degree:
+                continue  # graph neighborhood unchanged since last summary
+            relations_text = "\n".join(sorted(set(relation_lines_by_id.get(e.id, []))))
+            profile = summarize_entity(e.name_cn, e.description or "", relations_text, config_dict, reasoning_model_name)
+            if profile:
+                e.properties = {**(e.properties or {}), **profile, "summary_degree": degree}
 
         task.status   = "completed"
         task.progress = {"stage": "done", "pct": 100}

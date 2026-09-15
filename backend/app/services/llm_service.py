@@ -389,6 +389,51 @@ def infer_relations(entities: list, existing_relations: list, text: str,
         return []  # relation inference failure is non-fatal
 
 
+def summarize_entity(
+    name: str, description: str, relations_text: str, model_config: dict, model_name: str,
+) -> dict | None:
+    """Hub-node profile synthesis (graph-engineering playbook, Section V.A):
+    for a high-degree entity, synthesize a 2-3 paragraph summary, 3-5 atomic
+    traceable key facts, and a time range from its grounded description and
+    its known graph relations. Returns None on failure — summarization is
+    best-effort and never blocks extraction."""
+    provider = model_config.get("provider", "openai")
+    api_key = model_config.get("api_key", "")
+    api_base = model_config.get("api_base")
+
+    system_prompt = (
+        f"为本体实体「{name}」生成知识图谱画像。\n\n"
+        f"已知描述：{description or '（无）'}\n\n"
+        f"该实体在图中的已知关系：\n{relations_text or '（无）'}\n\n"
+        "基于以上信息写一段2-3段的事实性综合描述；如信息有冲突，优先采用更具体的说法；"
+        "提炼3-5条可溯源到上述描述/关系的原子关键事实；不要编造描述和关系之外没有支持的事实；"
+        "时间范围用 YYYY 或 YYYY-MM 格式，没有明确时间信息就填 \"unknown\"。\n\n"
+        '只返回 JSON：{"summary": "...", "key_facts": ["...", "..."], '
+        '"time_range": {"start": "...", "end": "..."}}'
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"实体：{name}"},
+    ]
+    try:
+        parsed = _parse_response(_call_llm(provider, api_key, api_base, model_name, messages))
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    time_range = parsed.get("time_range")
+    if not isinstance(time_range, dict):
+        time_range = {"start": "unknown", "end": "unknown"}
+    return {
+        "summary": str(parsed.get("summary") or ""),
+        "key_facts": [f for f in (parsed.get("key_facts") or []) if isinstance(f, str)][:5],
+        "time_range": {
+            "start": str(time_range.get("start") or "unknown"),
+            "end": str(time_range.get("end") or "unknown"),
+        },
+    }
+
+
 def _call_llm(provider: str, api_key: str, api_base: str | None, model: str, messages: list, json_mode: bool = True) -> str:
     # Stable seed for reproducibility: derived from message content so same input → same seed.
     import hashlib as _hashlib, json as _json

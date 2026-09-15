@@ -371,3 +371,101 @@ def test_extraction_task_stores_graph_diagnostics(schema, monkeypatch):
         assert diagnostics["isolated_entities"] == ["孤立实体"]
     finally:
         session.close()
+
+
+_HUB_RESULT = {
+    "entities": [
+        {"name_cn": "借款人", "type": "Concept", "description": "贷款申请人", "properties": {}},
+        {"name_cn": "贷款", "type": "Concept", "description": "d", "properties": {}},
+        {"name_cn": "授信额度", "type": "Concept", "description": "d", "properties": {}},
+        {"name_cn": "信用评分", "type": "Concept", "description": "d", "properties": {}},
+    ],
+    "relations": [
+        {"source": "借款人", "target": "贷款", "type": "APPLIES_FOR", "confidence": 0.9},
+        {"source": "借款人", "target": "授信额度", "type": "HAS", "confidence": 0.9},
+        {"source": "借款人", "target": "信用评分", "type": "HAS", "confidence": 0.9},
+    ],
+    "logic_rules": [], "actions": [],
+}
+
+
+def test_hub_entity_gets_summarized(schema, monkeypatch):
+    """A degree-3+ entity (playbook Section V.A hub threshold) gets a
+    synthesized profile stored on its properties; low-degree entities do not."""
+    factory, session = _worker(schema)
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: _HUB_RESULT)
+    monkeypatch.setattr(
+        "app.services.llm_service._call_llm",
+        lambda *a, **k: '{"summary": "借款人是核心概念。", "key_facts": ["f1"], '
+                        '"time_range": {"start": "2026", "end": "ongoing"}}',
+    )
+    extraction_task.run_extraction(task_id)
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+        rows = session.execute(text(
+            "SELECT name_cn, properties FROM entities WHERE ontology_id = 'o-llm'"
+        )).mappings().all()
+        props_by_name = {r["name_cn"]: (json.loads(r["properties"]) if isinstance(r["properties"], str) else r["properties"]) for r in rows}
+        assert props_by_name["借款人"]["summary"] == "借款人是核心概念。"
+        assert props_by_name["借款人"]["summary_degree"] == 3
+        # a degree-1 entity is not summarized
+        assert "summary" not in props_by_name["贷款"]
+    finally:
+        session.close()
+
+
+def test_hub_entity_summary_skipped_when_degree_unchanged_on_rerun(schema, monkeypatch):
+    """Re-running with the same graph shape must not re-call the summarizer —
+    only a changed source-document set (reflected here as a changed degree)
+    should trigger re-summarization."""
+    factory, session = _worker(schema)
+    task_id_1 = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: _HUB_RESULT)
+    # resolve_entities isn't exercised on a from-scratch run (nothing existing
+    # to resolve against yet), so mocking summarize_entity alone is enough
+    # here and avoids also stubbing out the (unrelated) resolution LLM call
+    monkeypatch.setattr(
+        "app.services.llm_service.summarize_entity",
+        lambda *a, **k: {"summary": "first pass", "key_facts": [], "time_range": {"start": "unknown", "end": "unknown"}},
+    )
+    extraction_task.run_extraction(task_id_1)
+
+    task_id_2 = str(uuid.uuid4())
+    session.execute(text(
+        "INSERT INTO extraction_tasks (id, ontology_id, prompt_id, model_id, status, parameters, progress, error, created_at, updated_at) "
+        "VALUES (:id, 'o-llm', 'p-1', 'm-1', 'queued', :params, '{}'::json, NULL, now(), now())"
+    ), {"id": task_id_2, "params": '{"model_name": "mock-extractor", "constraints": []}'})
+    session.commit()
+
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: _HUB_RESULT)
+    # resolve_entities still runs (4 new entities of the same type) and needs
+    # a harmless response so it doesn't attempt a real network call; the
+    # assertion this test cares about is that summarize_entity is skipped
+    monkeypatch.setattr("app.services.llm_service._call_llm", lambda *a, **k: '{"clusters": []}')
+    monkeypatch.setattr(
+        "app.services.llm_service.summarize_entity",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("summarizer should not be called again")),
+    )
+    extraction_task.run_extraction(task_id_2)
+
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id_2}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+        properties = session.execute(text(
+            "SELECT properties FROM entities WHERE ontology_id = 'o-llm' AND name_cn = '借款人'"
+        )).scalar_one()
+        properties = json.loads(properties) if isinstance(properties, str) else properties
+        # untouched from the first run — the summarizer was never invoked again
+        assert properties["summary"] == "first pass"
+    finally:
+        session.close()
