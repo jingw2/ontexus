@@ -373,6 +373,39 @@ def test_extraction_task_stores_graph_diagnostics(schema, monkeypatch):
         session.close()
 
 
+def test_graph_diagnostics_sees_this_runs_own_relations_under_autoflush_off(schema, monkeypatch):
+    """Production's SessionLocal is autoflush=False (app/database.py), unlike
+    the _worker fixture's default-autoflush factory used above. The
+    diagnostics query must still see this run's own newly-added entities and
+    relations rather than only whatever was committed before this run began."""
+    factory = sessionmaker(bind=create_engine(_scoped_url(schema)), autoflush=False)
+    session = factory()
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+    monkeypatch.setattr(
+        "app.services.llm_service.extract_ontology",
+        lambda *a, **k: {
+            "entities": [
+                {"name_cn": "借款人", "type": "Concept", "description": "d", "properties": {}},
+                {"name_cn": "贷款", "type": "Concept", "description": "d", "properties": {}},
+            ],
+            "relations": [{"source": "借款人", "target": "贷款", "type": "APPLIES_FOR", "confidence": 0.9}],
+            "logic_rules": [], "actions": [],
+        },
+    )
+    extraction_task.run_extraction(task_id)
+    try:
+        report = session.execute(text(
+            "SELECT validation_report FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).scalar_one()
+        diagnostics = json.loads(report)["graph_diagnostics"] if isinstance(report, str) else report["graph_diagnostics"]
+        assert diagnostics["edge_count"] == 1
+        assert diagnostics["connected_components"] == 1
+    finally:
+        session.close()
+
+
 _HUB_RESULT = {
     "entities": [
         {"name_cn": "借款人", "type": "Concept", "description": "贷款申请人", "properties": {}},

@@ -776,7 +776,10 @@ def run_extraction(self, task_id: str):
 
         # graph-engineering playbook diagnostics: computed over the ontology's
         # full saved graph (not just this run's output), so a stale connected-
-        # components count from a prior run never masks today's actual state
+        # components count from a prior run never masks today's actual state.
+        # session autoflush is off (app/database.py), so this run's own
+        # entity/relation adds above must be flushed before querying them back.
+        db.flush()
         from app.services.graph_diagnostics import compute_graph_diagnostics
         final_entities = db.query(Entity).filter(Entity.ontology_id == task.ontology_id).all()
         final_relations = db.query(Relation).filter(Relation.ontology_id == task.ontology_id).all()
