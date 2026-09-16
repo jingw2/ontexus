@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 from app.models import (  # noqa: E402, F401
     user, ontology, file, prompt, model_config,
     entity, logic as logic_model, action, relation, extraction_task, rules_config,
+    entity_instance, entity_instance_relation,
 )
 
 # ── 概念/实例分离指令 — 追加到所有提取 Prompt 之后 ───────────────────────────
@@ -22,6 +23,11 @@ entities 数组只填"概念/类型"实体（如"供应商""借款人""贷款产
 文档中提到的具体命名实例，放入新增的 instances 数组，通过 entity_type 字段关联到其所属概念的 name_cn：
 "instances": [{"entity_type": "所属概念的name_cn", "name_cn": "实例名称", "name_en": "可选", "properties": {"属性1": "值"}, "confidence": 0.9}]
 relations 只在概念之间建立（如 供应商 -[supply]-> 产品），不要在具体实例之间建立关系。
+
+如果两个具体命名实例之间存在文档明确写出的因果/治疗/相互作用等关系（如"2型糖尿病 导致 糖尿病肾病""阿司匹林 与 华法林 相互作用"），
+放入新增的 instance_relations 数组，不要因为"relations 只在概念之间建立"而丢弃这类信息：
+"instance_relations": [{"source": "实例名称", "target": "实例名称", "type": "causes|interacts_with|治疗|等英文或语义明确的关系类型", "confidence": 0.9}]
+source/target 必须是 instances 数组里已出现的 name_cn，不要引用未提取的实例或概念实体本身。
 
 属性的枚举值/分级/分档/阶段标签（如信用分层的"A层""B层""C层"、逾期阶段的"M0""M1""M2+"、
 融资轮次的"A轮融资""D轮融资"）不是独立的概念，也不是需要单独建 instance 的命名对象——它们是所属
@@ -40,6 +46,7 @@ def _merge_extraction_results(results: list[dict]) -> dict:
     all_logic: list[dict] = []
     all_actions: list[dict] = []
     all_instances: list[dict] = []
+    all_instance_relations: list[dict] = []
 
     # 收集全部
     for r in results:
@@ -62,6 +69,9 @@ def _merge_extraction_results(results: list[dict]) -> dict:
         for inst in (r.get("instances") or []):
             if isinstance(inst, dict):
                 all_instances.append(inst)
+        for ir in (r.get("instance_relations") or []):
+            if isinstance(ir, dict):
+                all_instance_relations.append(ir)
 
     # 实体去重（按 name_cn，保留属性最丰富的）
     seen_entities: dict[str, dict] = {}
@@ -125,12 +135,22 @@ def _merge_extraction_results(results: list[dict]) -> dict:
             seen_instances.add(key)
             instances.append(inst)
 
+    # 实例关系去重（source-target-type 唯一）
+    seen_inst_rels: set = set()
+    instance_relations = []
+    for ir in all_instance_relations:
+        key = (ir.get("source", ""), ir.get("target", ""), ir.get("type", ""))
+        if key not in seen_inst_rels and key[0] and key[1]:
+            seen_inst_rels.add(key)
+            instance_relations.append(ir)
+
     return {
         "entities": entities,
         "relations": relations,
         "logic_rules": list(seen_logic.values()),
         "actions": list(seen_actions.values()),
         "instances": instances,
+        "instance_relations": instance_relations,
     }
 
 
@@ -576,6 +596,10 @@ def run_extraction(self, task_id: str):
         # ── 写入实例数据（EntityInstance 表）— 挂在概念实体下，对齐 Pipeline Mapping ──
         from app.models.entity_instance import EntityInstance
         import hashlib as _hl
+        # instance_relations (below) needs to resolve a source/target instance
+        # name back to its stable id and owning concept entity id
+        instance_name_to_id: dict = {}
+        instance_id_to_entity_id: dict = {}
         for inst_data in result.get("instances", []):
             if not isinstance(inst_data, dict):
                 continue
@@ -610,11 +634,14 @@ def run_extraction(self, task_id: str):
                 id=stable_id, entity_id=concept_id, ontology_id=task.ontology_id,
                 row_identity=inst_name, row_data=inst_props,
             ))
+            instance_name_to_id[inst_name] = stable_id
+            instance_id_to_entity_id[stable_id] = concept_id
         db.commit()
 
         # ── Fix 2+4: upsert relations (by source_id, target_id, type) ────────
         existing_rels    = db.query(Relation).filter(Relation.ontology_id == task.ontology_id).all()
         existing_rel_set = {(r.source_entity, r.target_entity, r.type) for r in existing_rels}
+        relation_id_by_key: dict = {(r.source_entity, r.target_entity, r.type): r.id for r in existing_rels}
 
         for rel in result.get("relations", []):
             src_name = rel.get("source") or rel.get("source_entity", "")
@@ -626,12 +653,65 @@ def run_extraction(self, task_id: str):
             if rel_type in ("关联", "未知", "相关", "其他", "") or not rel_type.isascii():
                 continue
             if src_id and tgt_id and (src_id, tgt_id, rel_type) not in existing_rel_set:
+                new_rel_id = str(uuid.uuid4())
                 db.add(Relation(
-                    id=str(uuid.uuid4()), ontology_id=task.ontology_id,
+                    id=new_rel_id, ontology_id=task.ontology_id,
                     source_entity=src_id, target_entity=tgt_id,
                     type=rel_type, confidence=rel.get("confidence", 0.85),
                 ))
                 existing_rel_set.add((src_id, tgt_id, rel_type))
+                relation_id_by_key[(src_id, tgt_id, rel_type)] = new_rel_id
+
+        # ── instance-level relations (graph-engineering playbook): specific
+        # named things (e.g. 2型糖尿病, 阿司匹林) keep their own relation graph
+        # via EntityInstanceRelation, anchored to the concept-level Relation
+        # it instantiates (auto-created here if the LLM didn't also emit it) ──
+        from app.models.entity_instance_relation import EntityInstanceRelation
+        existing_inst_rels = db.query(EntityInstanceRelation).filter(
+            EntityInstanceRelation.ontology_id == task.ontology_id).all()
+        existing_inst_rel_set = {
+            (r.source_instance_id, r.target_instance_id, r.relation_definition_id)
+            for r in existing_inst_rels
+        }
+
+        for ir in result.get("instance_relations", []):
+            if not isinstance(ir, dict):
+                continue
+            src_iid = _fuzzy_resolve_entity(ir.get("source", ""), instance_name_to_id)
+            tgt_iid = _fuzzy_resolve_entity(ir.get("target", ""), instance_name_to_id)
+            if not src_iid or not tgt_iid:
+                continue
+            ir_type = (ir.get("type") or "RELATED").strip()
+            if ir_type in ("关联", "未知", "相关", "其他", "") or not ir_type.isascii():
+                continue
+            src_concept_id = instance_id_to_entity_id.get(src_iid)
+            tgt_concept_id = instance_id_to_entity_id.get(tgt_iid)
+            if not src_concept_id or not tgt_concept_id:
+                continue
+            concept_key = (src_concept_id, tgt_concept_id, ir_type)
+            rel_def_id = relation_id_by_key.get(concept_key)
+            if not rel_def_id:
+                rel_def_id = str(uuid.uuid4())
+                db.add(Relation(
+                    id=rel_def_id, ontology_id=task.ontology_id,
+                    source_entity=src_concept_id, target_entity=tgt_concept_id,
+                    type=ir_type, confidence=ir.get("confidence", 0.8),
+                ))
+                existing_rel_set.add(concept_key)
+                relation_id_by_key[concept_key] = rel_def_id
+                # the FK from entity_instance_relations to relations must see
+                # this row on insert — flush now rather than trust autoflush
+                # ordering across the two tables
+                db.flush()
+            edge_key = (src_iid, tgt_iid, rel_def_id)
+            if edge_key not in existing_inst_rel_set:
+                db.add(EntityInstanceRelation(
+                    id=str(uuid.uuid4()), ontology_id=task.ontology_id,
+                    source_instance_id=src_iid, target_instance_id=tgt_iid,
+                    relation_definition_id=rel_def_id,
+                    properties={"confidence": ir.get("confidence", 0.8)},
+                ))
+                existing_inst_rel_set.add(edge_key)
 
         # ── Keyword matching helpers (unchanged) ─────────────────────────────
         all_entity_names = [
@@ -857,6 +937,8 @@ def _sync_neo4j(db, ontology_id: str) -> None:
         from app.services.v2.graph.neo4j_service import Neo4jService
         from app.models.entity import Entity
         from app.models.relation import Relation
+        from app.models.entity_instance import EntityInstance
+        from app.models.entity_instance_relation import EntityInstanceRelation
 
         svc = Neo4jService()
         if not svc.available:
@@ -902,6 +984,39 @@ def _sync_neo4j(db, ontology_id: str) -> None:
                 tgt_label=tgt_type, tgt_key=r.target_entity,
                 rel_type=rel_type,
                 props={"id": r.id, "ontology_id": ontology_id, "confidence": r.confidence or 0.85},
+            )
+
+        # 具体命名实例（如 2型糖尿病、阿司匹林）作为独立节点同步，标签在概念类型
+        # 后加 Instance 后缀，与概念节点区分开，避免图查询把概念和实例混为一谈
+        instances = db.query(EntityInstance).filter(EntityInstance.ontology_id == ontology_id).all()
+        instance_label_map: dict[str, str] = {}
+        for inst in instances:
+            concept_type = entity_type_map.get(inst.entity_id, "OntologyEntity")
+            label = f"{concept_type}Instance"
+            instance_label_map[inst.id] = label
+            props = {
+                **(inst.row_data or {}),
+                "id": inst.id,
+                "ontology_id": ontology_id,
+                "entity_id": inst.entity_id,
+                "name_cn": inst.row_identity,
+            }
+            svc.upsert_entity(label, props, key_field="id")
+
+        # 实例级关系（语义概念层面的 relation 已在上面写入；具体实例之间的边只
+        # 存在于 Neo4j，不进 Postgres relations 表）
+        inst_relations = db.query(EntityInstanceRelation).filter(
+            EntityInstanceRelation.ontology_id == ontology_id).all()
+        relation_type_by_id = {r.id: r.type for r in relations}
+        for ir in inst_relations:
+            src_label = instance_label_map.get(ir.source_instance_id, "OntologyEntityInstance")
+            tgt_label = instance_label_map.get(ir.target_instance_id, "OntologyEntityInstance")
+            rel_type = (relation_type_by_id.get(ir.relation_definition_id) or "RELATED").upper().replace(" ", "_").replace("-", "_")
+            svc.upsert_relation(
+                src_label=src_label, src_key=ir.source_instance_id,
+                tgt_label=tgt_label, tgt_key=ir.target_instance_id,
+                rel_type=rel_type,
+                props={"id": ir.id, "ontology_id": ontology_id, **(ir.properties or {})},
             )
 
         svc.close()

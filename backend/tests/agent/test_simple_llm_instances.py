@@ -163,6 +163,106 @@ def test_simple_llm_tabular_extraction_materializes_instances(schema, monkeypatc
         session.close()
 
 
+def test_instance_relations_create_concept_relation_and_instance_edge(schema, monkeypatch):
+    """A causal/interaction relation between two SPECIFIC named instances
+    (e.g. 2型糖尿病 causes 糖尿病肾病) must not be silently dropped just
+    because 'relations only connect concepts' — it auto-creates the concept-
+    level Relation it instantiates and lands as an EntityInstanceRelation
+    edge between the two instance rows."""
+    factory, session = _worker(schema)
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+
+    fake_result = {
+        "entities": [{"name_cn": "疾病", "type": "Disease", "description": "d", "properties": {}}],
+        "relations": [], "logic_rules": [], "actions": [],
+        "instances": [
+            {"entity_type": "疾病", "name_cn": "2型糖尿病", "properties": {}},
+            {"entity_type": "疾病", "name_cn": "糖尿病肾病", "properties": {}},
+        ],
+        "instance_relations": [
+            {"source": "2型糖尿病", "target": "糖尿病肾病", "type": "causes", "confidence": 0.9},
+        ],
+    }
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: fake_result)
+
+    extraction_task.run_extraction(task_id)
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+
+        concept_rels = session.execute(text(
+            "SELECT type FROM relations WHERE ontology_id = 'o-llm'"
+        )).mappings().all()
+        assert [r["type"] for r in concept_rels] == ["causes"]
+
+        edge = session.execute(text(
+            "SELECT ei_src.row_identity AS src, ei_tgt.row_identity AS tgt "
+            "FROM entity_instance_relations eir "
+            "JOIN entity_instances ei_src ON ei_src.id = eir.source_instance_id "
+            "JOIN entity_instances ei_tgt ON ei_tgt.id = eir.target_instance_id "
+            "WHERE eir.ontology_id = 'o-llm'"
+        )).mappings().one()
+        assert edge["src"] == "2型糖尿病"
+        assert edge["tgt"] == "糖尿病肾病"
+    finally:
+        session.close()
+
+
+def test_instance_relations_rerun_does_not_duplicate(schema, monkeypatch):
+    """Re-running extraction with the same instance_relations output must not
+    create a second EntityInstanceRelation edge or a second concept Relation."""
+    factory, session = _worker(schema)
+    task_id_1 = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+
+    fake_result = {
+        "entities": [{"name_cn": "疾病", "type": "Disease", "description": "d", "properties": {}}],
+        "relations": [], "logic_rules": [], "actions": [],
+        "instances": [
+            {"entity_type": "疾病", "name_cn": "2型糖尿病", "properties": {}},
+            {"entity_type": "疾病", "name_cn": "糖尿病肾病", "properties": {}},
+        ],
+        "instance_relations": [
+            {"source": "2型糖尿病", "target": "糖尿病肾病", "type": "causes", "confidence": 0.9},
+        ],
+    }
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: fake_result)
+    extraction_task.run_extraction(task_id_1)
+
+    task_id_2 = str(uuid.uuid4())
+    session.execute(text(
+        "INSERT INTO extraction_tasks (id, ontology_id, prompt_id, model_id, status, parameters, progress, error, created_at, updated_at) "
+        "VALUES (:id, 'o-llm', 'p-1', 'm-1', 'queued', :params, '{}'::json, NULL, now(), now())"
+    ), {"id": task_id_2, "params": '{"model_name": "mock-extractor", "constraints": []}'})
+    session.commit()
+    monkeypatch.setattr(
+        "app.services.llm_service._call_llm",
+        lambda *a, **k: '{"clusters": []}',
+    )
+    extraction_task.run_extraction(task_id_2)
+
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id_2}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+        rel_count = session.execute(text(
+            "SELECT count(*) FROM relations WHERE ontology_id = 'o-llm'"
+        )).scalar_one()
+        edge_count = session.execute(text(
+            "SELECT count(*) FROM entity_instance_relations WHERE ontology_id = 'o-llm'"
+        )).scalar_one()
+        assert rel_count == 1
+        assert edge_count == 1
+    finally:
+        session.close()
+
+
 def test_single_document_near_duplicate_entities_are_resolved(schema, monkeypatch):
     """Sub-project E3 bug 1: a single-file extraction with near-duplicate
     entity names (e.g. "产品研发部" vs "产品研发部门") must still go through
