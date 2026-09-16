@@ -163,13 +163,69 @@ def test_simple_llm_tabular_extraction_materializes_instances(schema, monkeypatc
         session.close()
 
 
+def test_instance_relations_reuses_relation_from_plain_relations_array(schema, monkeypatch):
+    """Bug caught live on a 供应链 rebuild: when the LLM's own `relations` array
+    (not the instance_relations auto-create branch) is what creates the
+    concept-level Relation that an instance_relations entry then reuses via
+    relation_id_by_key, that relation must still be flushed before the
+    EntityInstanceRelation insert — otherwise it's an unflushed pending row
+    and the FK insert fails. Production's SessionLocal is autoflush=False
+    (app/database.py), unlike _worker's default-autoflush factory, so this
+    test builds its own session to match and actually catch the bug."""
+    factory = sessionmaker(bind=create_engine(_scoped_url(schema)), autoflush=False)
+    session = factory()
+    task_id = _seed(session)
+    monkeypatch.setattr("app.database.SessionLocal", factory)
+    import app.tasks.extraction as extraction_task
+
+    fake_result = {
+        "entities": [
+            {"name_cn": "供应商", "type": "Supplier", "description": "d", "properties": {}},
+            {"name_cn": "物料", "type": "Material", "description": "d", "properties": {}},
+        ],
+        "relations": [
+            {"source": "供应商", "target": "物料", "type": "supply", "confidence": 0.9},
+        ],
+        "logic_rules": [], "actions": [],
+        "instances": [
+            {"entity_type": "供应商", "name_cn": "天钢原材料有限公司", "properties": {}},
+            {"entity_type": "物料", "name_cn": "钢材", "properties": {}},
+        ],
+        "instance_relations": [
+            {"source": "天钢原材料有限公司", "target": "钢材", "type": "supply", "confidence": 0.9},
+        ],
+    }
+    monkeypatch.setattr("app.services.llm_service.extract_ontology", lambda *a, **k: fake_result)
+
+    extraction_task.run_extraction(task_id)
+    try:
+        status = session.execute(text(
+            "SELECT status, error FROM extraction_tasks WHERE id = :id"
+        ), {"id": task_id}).mappings().one()
+        assert status["status"] == "completed", status["error"]
+
+        edge = session.execute(text(
+            "SELECT ei_src.row_identity AS src, ei_tgt.row_identity AS tgt "
+            "FROM entity_instance_relations eir "
+            "JOIN entity_instances ei_src ON ei_src.id = eir.source_instance_id "
+            "JOIN entity_instances ei_tgt ON ei_tgt.id = eir.target_instance_id "
+            "WHERE eir.ontology_id = 'o-llm'"
+        )).mappings().one()
+        assert edge["src"] == "天钢原材料有限公司"
+        assert edge["tgt"] == "钢材"
+    finally:
+        session.close()
+
+
 def test_instance_relations_create_concept_relation_and_instance_edge(schema, monkeypatch):
     """A causal/interaction relation between two SPECIFIC named instances
     (e.g. 2型糖尿病 causes 糖尿病肾病) must not be silently dropped just
     because 'relations only connect concepts' — it auto-creates the concept-
     level Relation it instantiates and lands as an EntityInstanceRelation
-    edge between the two instance rows."""
-    factory, session = _worker(schema)
+    edge between the two instance rows. Uses an explicit autoflush=False
+    session to match production (app/database.py), not _worker's default."""
+    factory = sessionmaker(bind=create_engine(_scoped_url(schema)), autoflush=False)
+    session = factory()
     task_id = _seed(session)
     monkeypatch.setattr("app.database.SessionLocal", factory)
     import app.tasks.extraction as extraction_task
@@ -214,8 +270,10 @@ def test_instance_relations_create_concept_relation_and_instance_edge(schema, mo
 
 def test_instance_relations_rerun_does_not_duplicate(schema, monkeypatch):
     """Re-running extraction with the same instance_relations output must not
-    create a second EntityInstanceRelation edge or a second concept Relation."""
-    factory, session = _worker(schema)
+    create a second EntityInstanceRelation edge or a second concept Relation.
+    Uses an explicit autoflush=False session to match production."""
+    factory = sessionmaker(bind=create_engine(_scoped_url(schema)), autoflush=False)
+    session = factory()
     task_id_1 = _seed(session)
     monkeypatch.setattr("app.database.SessionLocal", factory)
     import app.tasks.extraction as extraction_task

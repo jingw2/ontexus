@@ -662,6 +662,11 @@ def run_extraction(self, task_id: str):
                 existing_rel_set.add((src_id, tgt_id, rel_type))
                 relation_id_by_key[(src_id, tgt_id, rel_type)] = new_rel_id
 
+        # instance_relations below may reuse any of the relations just added
+        # via relation_id_by_key as their relation_definition_id FK — flush
+        # now so those rows exist before EntityInstanceRelation references them
+        db.flush()
+
         # ── instance-level relations (graph-engineering playbook): specific
         # named things (e.g. 2型糖尿病, 阿司匹林) keep their own relation graph
         # via EntityInstanceRelation, anchored to the concept-level Relation
