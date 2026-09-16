@@ -918,6 +918,12 @@ def run_extraction(self, task_id: str):
             if task:
                 task.status = "failed"
                 task.error  = str(e)
+                # the router set the Ontology to "creating" when this task was
+                # queued — on failure it must go back to "draft" or it stays
+                # stuck showing "creating" forever with no task left to finish it
+                project = db.query(OntologyProject).filter(OntologyProject.id == task.ontology_id).first()
+                if project and project.status == "creating":
+                    project.status = "draft"
                 db.commit()
         except Exception:
             # session 可能已损坏，用新 session 兜底标记失败，避免任务永远卡在 running
@@ -928,6 +934,9 @@ def run_extraction(self, task_id: str):
                 if task:
                     task.status = "failed"
                     task.error  = str(e)
+                    project = fresh_db.query(OntologyProject).filter(OntologyProject.id == task.ontology_id).first()
+                    if project and project.status == "creating":
+                        project.status = "draft"
                     fresh_db.commit()
                 fresh_db.close()
             except Exception:

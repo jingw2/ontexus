@@ -328,6 +328,8 @@
     "empty": "No models configured. Click \"Add Model\" to get started.",
     "confirm_delete": "Confirm Delete",
     "confirm_delete_msg": "Delete model \"{{name}}\"?",
+    "delete_failed_referenced": "Cannot delete: this model is still used by an Agent. Unbind or delete the Agent first.",
+    "delete_failed_generic": "Delete failed, please try again",
     "config_type_llm": "LLM Config",
     "config_type_ocr": "OCR Config",
     "config_type_other": "Other Config",

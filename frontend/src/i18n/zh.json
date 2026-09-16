@@ -328,6 +328,8 @@
     "empty": "暂无模型配置，点击「添加模型」开始",
     "confirm_delete": "确认删除",
     "confirm_delete_msg": "删除模型「{{name}}」？",
+    "delete_failed_referenced": "无法删除：该模型仍被智能体使用，请先解绑或删除相关智能体后再删除",
+    "delete_failed_generic": "删除失败，请稍后重试",
     "config_type_llm": "LLM配置",
     "config_type_ocr": "OCR配置",
     "config_type_other": "其他配置",

@@ -325,14 +325,30 @@ def delete_model(model_id: str, db: Session = Depends(get_db), _=Depends(require
     c = db.query(ModelConfig).filter(ModelConfig.id == model_id).first()
     if not c:
         raise HTTPException(404, "Not found")
+    # Block only on a REAL dependent — an Agent version pinned to one of this
+    # model's versions, or a prompt-generation provenance row — not merely on
+    # the model's own version-1 row that create_model() always bootstraps.
+    # Checking "any model_config_versions row exists" made every model saved
+    # through the normal create flow permanently undeletable.
     referenced = db.execute(text(
-        "SELECT count(*) FROM model_config_versions WHERE model_config_id = :id"
+        "SELECT count(*) FROM model_config_versions v WHERE v.model_config_id = :id AND ("
+        "EXISTS (SELECT 1 FROM agent_versions av WHERE av.default_model_config_version_id = v.id) "
+        "OR EXISTS (SELECT 1 FROM prompt_generations pg WHERE pg.model_config_version_id = v.id))"
     ), {"id": model_id}).scalar_one()
     if referenced > 0:
         raise HTTPException(409, detail="MODEL_REFERENCED")
     db.query(ExtractionTask).filter(ExtractionTask.model_id == model_id).update(
         {ExtractionTask.model_id: None}, synchronize_session=False
     )
+    # model_config_versions/model_credentials/model_migration_findings all
+    # RESTRICT-reference model_configs.id, so they must be cleared first —
+    # and model_configs.active_version_id RESTRICT-references the version
+    # row itself (the reverse direction), so that pointer must be nulled
+    # before the version row can go.
+    db.execute(text("UPDATE model_configs SET active_version_id = NULL WHERE id = :id"), {"id": model_id})
+    db.execute(text("DELETE FROM model_credentials WHERE model_config_id = :id"), {"id": model_id})
+    db.execute(text("DELETE FROM model_migration_findings WHERE model_config_id = :id"), {"id": model_id})
+    db.execute(text("DELETE FROM model_config_versions WHERE model_config_id = :id"), {"id": model_id})
     db.delete(c)
     db.commit()
 
