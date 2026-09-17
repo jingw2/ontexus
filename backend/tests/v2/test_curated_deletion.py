@@ -1,8 +1,10 @@
-"""Curated dataset deletion — MinIO object cleanup"""
+"""Curated dataset deletion — MinIO object cleanup and legacy-table cleanup"""
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
+from app.models.v2.curated import CuratedDataset, CuratedReview
 from app.models.v2.dataset import Dataset, DatasetVersion, MediaItem
 
 
@@ -60,6 +62,32 @@ def test_delete_curated_cleans_up_minio_objects(curated_client, db, admin_user, 
     r = curated_client.delete(f"/api/v2/curated/{ds_id}", headers=headers)
     assert r.status_code == 204
     assert sorted(deleted) == sorted(expected_uris)
+
+
+def test_delete_curated_removes_legacy_mirror_row(curated_client, db, admin_user, monkeypatch):
+    """Once a dataset has been through review, _ensure_curated_dataset_row
+    (and the older /review endpoint) lazily creates a v2_curated_datasets
+    row with the SAME id as the real v2_datasets row, purely as an FK bridge
+    for CuratedReview. Deleting the dataset must remove that mirror row too
+    — previously delete_curated only ever deleted the v2_datasets row and
+    the CuratedReview rows, leaving the CuratedDataset mirror as a permanent
+    orphan."""
+    monkeypatch.setattr("app.services.storage_service.get_storage_service", lambda: object())
+    ds_id, _ = _make_curated_with_media(db)
+    # simulate what a completed review leaves behind
+    db.add(CuratedDataset(id=ds_id, name="mirror", status="approved"))
+    db.add(CuratedReview(
+        id=str(uuid.uuid4()), curated_dataset_id=ds_id, status="approved",
+        decided_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+    headers = _login(curated_client, "admin", "admin123")
+    r = curated_client.delete(f"/api/v2/curated/{ds_id}", headers=headers)
+    assert r.status_code == 204
+
+    assert db.query(CuratedDataset).filter(CuratedDataset.id == ds_id).first() is None
+    assert db.query(CuratedReview).filter(CuratedReview.curated_dataset_id == ds_id).first() is None
 
 
 def test_delete_curated_survives_minio_failure(curated_client, db, admin_user, monkeypatch):
