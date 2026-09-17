@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
@@ -13,6 +15,7 @@ from app.services.ontology_access import creator_grant
 from app.services.publication.working_copy import OntologyWorkingCopyService
 import uuid
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("")
@@ -82,9 +85,14 @@ def delete_ontology(ontology_id: str, db: Session = Depends(get_db), _=Depends(r
     # gone, unlike execution history (agent runs, sandbox simulations,
     # business-journey records, MCP write requests) rooted through
     # ontology_releases, which a delete must not silently wipe.
+    # entity_instance_relations (and entity_instances, cascade-deleted below)
+    # carry an AFTER DELETE trigger that re-emits agent_index_outbox rows —
+    # agent_index_outbox must be cleaned LAST so it sweeps up anything those
+    # triggers just recreated, or the delete below hits ONTOLOGY_HAS_DEPENDENT_DATA
+    # on an ontology that still has real instance data.
     for table in (
         "ontology_data_grants", "ontology_project_access_grants", "ontology_migration_findings",
-        "agent_index_outbox", "entity_property_definitions", "entity_instance_relations",
+        "entity_property_definitions", "entity_instance_relations", "agent_index_outbox",
     ):
         db.execute(text(f"DELETE FROM {table} WHERE ontology_id = :id"), {"id": ontology_id})
     try:
@@ -93,3 +101,18 @@ def delete_ontology(ontology_id: str, db: Session = Depends(get_db), _=Depends(r
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, detail="ONTOLOGY_HAS_DEPENDENT_DATA")
+
+    # Best-effort external-store cleanup — never fails an already-committed
+    # delete; Neo4j/Chroma hold per-ontology graph/vector data with no other
+    # owner once the Postgres row is gone (mirrors the try/except-and-log
+    # pattern in app/tasks/extraction.py's _sync_neo4j).
+    try:
+        from app.services.v2.graph.neo4j_service import Neo4jService
+        Neo4jService().delete_by_ontology(ontology_id)
+    except Exception:
+        logger.warning("Neo4j cleanup failed for deleted ontology %s", ontology_id, exc_info=True)
+    try:
+        from app.services.v2.vector.chroma_service import ChromaService
+        ChromaService().delete_collection(f"ontology_{ontology_id}")
+    except Exception:
+        logger.warning("Chroma cleanup failed for deleted ontology %s", ontology_id, exc_info=True)
