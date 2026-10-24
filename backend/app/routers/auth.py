@@ -1,11 +1,22 @@
 import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user
 from app.limiter import limiter
 from app.schemas.auth import LoginRequest, TokenResponse, RegisterRequest, PasswordChangeRequest
 from app.schemas.user import UserOut
 from app.services.auth_service import authenticate_user, create_access_token, hash_password, verify_password
+from app.services.chatgpt_oauth import (
+    ChatGptLoginError,
+    begin_login,
+    consume_transaction,
+    exchange_authorization_code,
+    frontend_destination,
+    login_error_destination,
+    resolve_user,
+    verify_id_token,
+)
 from app.services.auth_refresh import (
     RefreshSessionError,
     create_refresh_session,
@@ -21,6 +32,7 @@ router = APIRouter()
 
 REFRESH_COOKIE = "ontexus_refresh"
 CSRF_COOKIE = "csrf_token"
+CHATGPT_TX_COOKIE = "chatgpt_oauth_tx"
 
 
 def _set_auth_cookies(response: Response, refresh_token: str) -> None:
@@ -93,6 +105,67 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
         revoke_refresh_session(db, refresh_token)
     _clear_auth_cookies(response)
     return {"message": "ok"}
+
+
+def _chatgpt_error(code: str) -> RedirectResponse:
+    response = RedirectResponse(login_error_destination(code), status_code=302)
+    response.delete_cookie(CHATGPT_TX_COOKIE, path="/api/v1/auth/chatgpt")
+    return response
+
+
+@router.get("/chatgpt/start")
+@limiter.limit("10/minute")
+def chatgpt_start(request: Request, return_to: str | None = None, db: Session = Depends(get_db)):
+    try:
+        tx_id, url = begin_login(db, return_to)
+    except ChatGptLoginError as exc:
+        return _chatgpt_error(exc.code)
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(
+        CHATGPT_TX_COOKIE,
+        tx_id,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=600,
+        path="/api/v1/auth/chatgpt",
+    )
+    return response
+
+
+@router.get("/chatgpt/callback")
+@limiter.limit("20/minute")
+def chatgpt_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    tx_id = request.cookies.get(CHATGPT_TX_COOKIE)
+    if error or not code:
+        if tx_id and state:
+            try:
+                consume_transaction(db, tx_id, state)
+            except ChatGptLoginError:
+                pass
+        return _chatgpt_error("denied" if error == "access_denied" else "failed")
+    try:
+        attempt = consume_transaction(db, tx_id, state)
+        id_token = exchange_authorization_code(code, attempt)
+        claims = verify_id_token(
+            id_token,
+            nonce=attempt.nonce,
+            client_id=settings.chatgpt_oauth_client_id.strip(),
+        )
+        user = resolve_user(db, claims)
+        refresh_token = create_refresh_session(db, user.id)
+    except ChatGptLoginError as exc:
+        return _chatgpt_error(exc.code)
+    response = RedirectResponse(frontend_destination(attempt.return_to), status_code=302)
+    _set_auth_cookies(response, refresh_token)
+    response.delete_cookie(CHATGPT_TX_COOKIE, path="/api/v1/auth/chatgpt")
+    return response
 
 
 @router.post("/register", status_code=201)

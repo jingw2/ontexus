@@ -83,7 +83,12 @@
     "tagline": "Ontology Knowledge Engineering Platform",
     "ph_username": "Username",
     "ph_password": "Password",
-    "register_failed": "Registration failed, please check your information"
+    "register_failed": "Registration failed, please check your information",
+    "continue_chatgpt": "Continue with ChatGPT",
+    "chatgpt_error_not_configured": "ChatGPT sign-in is not configured",
+    "chatgpt_error_denied": "ChatGPT sign-in was cancelled",
+    "chatgpt_error_failed": "ChatGPT sign-in failed",
+    "chatgpt_error_email_in_use": "An account with this email already exists. Sign in with your password"
   },
   "oauth": {
     "consent_title": "Authorize access",

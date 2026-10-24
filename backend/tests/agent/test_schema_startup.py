@@ -168,6 +168,8 @@ def test_load_all_models_registers_current_milestone_without_database_io():
         "auth_refresh_tokens",
         "business_journey_model_calls",
         "business_journey_preparations",
+        "chatgpt_account_links",
+        "chatgpt_login_transactions",
         "entities",
         "entity_instance_relations",
         "entity_instances",

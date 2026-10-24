@@ -13,6 +13,15 @@ export default function LoginPage() {
   const { t } = useTranslation()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const returnTo = searchParams.get('returnTo')
+  const safeReturnTo = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//') && !returnTo.includes('\\')
+    ? returnTo
+    : ''
+  const chatgptHref = safeReturnTo
+    ? `/api/v1/auth/chatgpt/start?return_to=${encodeURIComponent(safeReturnTo)}`
+    : '/api/v1/auth/chatgpt/start'
+  const chatgptCode = searchParams.get('chatgpt_error')
+  const chatgptError = chatgptCode ? t(`auth.chatgpt_error_${chatgptCode}`, { defaultValue: t('auth.chatgpt_error_failed') }) : ''
 
   const onSubmit = async (data: { username: string; password: string }) => {
     setLoading(true)
@@ -43,6 +52,10 @@ export default function LoginPage() {
       <div className="w-full max-w-sm bg-white rounded-lg shadow p-8">
         <h1 className="text-2xl font-semibold mb-2">Ontexus</h1>
         <p className="text-gray-500 text-sm mb-6">{t('auth.tagline')}</p>
+        <a href={chatgptHref}
+          className="block w-full text-center border border-black rounded-lg py-2 text-sm font-medium mb-4">
+          {t('auth.continue_chatgpt')}
+        </a>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1">{t('auth.username')}</label>
@@ -54,7 +67,7 @@ export default function LoginPage() {
             <input {...register('password', { required: true })} type="password" placeholder={t('auth.ph_password')}
               className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black" />
           </div>
-          {error && <p className="text-red-500 text-sm">{error}</p>}
+          {(error || chatgptError) && <p className="text-red-500 text-sm">{error || chatgptError}</p>}
           <button type="submit" disabled={loading}
             className="w-full bg-black text-white rounded-lg py-2 text-sm font-medium disabled:opacity-50">
             {loading ? t('common.loading') : t('auth.login')}

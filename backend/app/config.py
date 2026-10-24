@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     uploads_dir: str = "./uploads"
     access_token_expire_minutes: int = 1440  # 24h
     oauth_frontend_base_url: str = "http://localhost:5173"
+    # Sign in with ChatGPT. Empty client id disables the flow.
+    # Authorization https://auth.openai.com/api/accounts/authorize
+    # Token https://auth.openai.com/api/accounts/oauth/token
+    chatgpt_oauth_client_id: str = ""
+    chatgpt_oauth_client_secret: str = ""
+    chatgpt_oauth_redirect_uri: str = ""
     oauth_authorization_code_expire_seconds: int = 300  # 5 minutes
     oauth_access_token_expire_minutes: int = 60  # 1 hour
     oauth_refresh_token_expire_days: int = 30

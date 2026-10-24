@@ -83,6 +83,8 @@ LATER_REVISION_TABLES = {
     "application_state_schema_versions",
     "business_journey_model_calls",
     "business_journey_preparations",
+    "chatgpt_account_links",
+    "chatgpt_login_transactions",
     "entity_instance_relations",
     "governed_turn_plans",
     "managed_action_bindings",

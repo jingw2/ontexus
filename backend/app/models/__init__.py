@@ -83,6 +83,7 @@ from app.models.skill import (
 from app.models.mcp import McpConnectionSchema, McpOauthToken
 from app.models.mcp_write_request import McpWriteRequest
 from app.models.oauth import OAuthClient, OAuthAuthorizationCode, OAuthRefreshFamily, OAuthRefreshToken
+from app.models.chatgpt_oauth import ChatGptAccountLink, ChatGptLoginTransaction
 from app.models.runtime_identity import RuntimeDelegatedCredential
 from app.models.runtime_plan import RuntimePlan
 from app.models.managed_action import ManagedActionBinding
@@ -180,6 +181,7 @@ def load_all_models():
         OAuthRefreshFamily,
         OAuthRefreshToken,
     )
+    from app.models.chatgpt_oauth import ChatGptAccountLink, ChatGptLoginTransaction  # noqa: F401
     from app.models.runtime_identity import RuntimeDelegatedCredential  # noqa: F401
     from app.models.runtime_plan import RuntimePlan  # noqa: F401
     from app.models.managed_action import ManagedActionBinding  # noqa: F401
@@ -276,6 +278,8 @@ __all__ = [
     "OAuthAuthorizationCode",
     "OAuthRefreshFamily",
     "OAuthRefreshToken",
+    "ChatGptAccountLink",
+    "ChatGptLoginTransaction",
     "RuntimeDelegatedCredential",
     "RuntimePlan",
     "ManagedActionBinding",

@@ -83,7 +83,12 @@
     "tagline": "本体知识工程平台",
     "ph_username": "用户名",
     "ph_password": "密码",
-    "register_failed": "注册失败，请检查信息"
+    "register_failed": "注册失败，请检查信息",
+    "continue_chatgpt": "使用 ChatGPT 继续",
+    "chatgpt_error_not_configured": "ChatGPT 登录尚未配置",
+    "chatgpt_error_denied": "ChatGPT 登录已取消",
+    "chatgpt_error_failed": "ChatGPT 登录失败",
+    "chatgpt_error_email_in_use": "该邮箱已有账号，请使用密码登录"
   },
   "oauth": {
     "consent_title": "授权访问",
