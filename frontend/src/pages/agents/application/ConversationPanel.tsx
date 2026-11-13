@@ -88,7 +88,8 @@ export default function ConversationPanel({
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')
   const [clarificationAnswer, setClarificationAnswer] = useState('')
-  const [journeyEvents, setJourneyEvents] = useState<RuntimeEventRecord[]>([])
+  const [journey, setJourney] = useState<{ turnId: string; events: RuntimeEventRecord[] } | null>(null)
+  const journeyEvents = journey?.turnId === turnId ? journey.events : []
   const [showGovernedPlan, setShowGovernedPlan] = useState(false)
 
   // Persisted turn events back the always-visible business-journey
@@ -98,11 +99,10 @@ export default function ConversationPanel({
   // a terminal SSE/polling state.
   useEffect(() => {
     let cancelled = false
-    void Promise.resolve().then(() => { if (!cancelled) setJourneyEvents([]) })
     if (!turnId) return () => { cancelled = true }
     const fetchEvents = () => {
       apiClient.get<{ items: RuntimeEventRecord[] }>(`/agent-turns/${turnId}/events?limit=100`)
-        .then(res => { if (!cancelled) setJourneyEvents(Array.isArray(res.items) ? res.items : []) })
+        .then(res => { if (!cancelled) setJourney({ turnId, events: Array.isArray(res.items) ? res.items : [] }) })
         .catch(() => {})
     }
     fetchEvents()
@@ -151,20 +151,20 @@ export default function ConversationPanel({
   // `app.services.runtime.answer_stream`) — polled on its own fast cadence
   // rather than piggybacking on the slower journeyEvents poll above, since
   // this is what actually needs to feel live.
-  const [liveAnswerText, setLiveAnswerText] = useState('')
+  const [liveAnswer, setLiveAnswer] = useState<{ turnId: string; text: string } | null>(null)
   useEffect(() => {
-    setLiveAnswerText('')
     if (!turnId || !isThinking) return
     let cancelled = false
     const poll = () => {
       apiClient.get<{ text: string } | null>(`/agent-turns/${turnId}/answer-stream`)
-        .then(res => { if (!cancelled && res) setLiveAnswerText(res.text) })
+        .then(res => { if (!cancelled && res) setLiveAnswer({ turnId, text: res.text }) })
         .catch(() => {})
     }
     poll()
     const interval = setInterval(poll, ANSWER_STREAM_POLL_INTERVAL_MS)
     return () => { cancelled = true; clearInterval(interval) }
   }, [turnId, isThinking])
+  const liveAnswerText = isThinking && liveAnswer?.turnId === turnId ? liveAnswer.text : ''
 
   const submit = () => {
     if (!draft.trim()) return

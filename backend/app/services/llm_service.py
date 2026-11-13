@@ -31,7 +31,12 @@ def extract_ontology(text: str, prompt_content: str, model_config: dict, model_n
             "每条关系的 source/target 必须取自已提取的实体\n"
             "5. 逻辑规则按 Palantir Ontology Functions 模型分类为 derived_property/aggregation/"
             "complex_edit/external_query 之一，写入 function_type + definition 字段，禁止输出 "
-            "IF-THEN 自然语言公式\n\n"
+            "IF-THEN 自然语言公式\n"
+            "6. 业务规则、政策、判断条件、定价/审批/校验类规则（如\"促销定价规则\"）不是实体，"
+            "禁止作为 entity 或 instance 输出，必须放入 logic_rules 数组\n"
+            "7. 属性的枚举值/分级/分档/阶段标签（如信用分层的\"A层\"\"B层\"、逾期阶段的\"M0\"\"M1\"、"
+            "融资轮次的\"A轮融资\"）不是独立概念也不是命名实例，不要为它们创建 entity 或 instance，"
+            "只需体现为所属概念某个属性的枚举值\n\n"
             f"文档内容：\n\n{text}"
         )},
     ]
@@ -61,7 +66,7 @@ def normalize_extracted_ontology(parsed: Any) -> dict:
         if not isinstance(entity, dict):
             continue
         name = _clean_entity_name(entity.get("name_cn"))
-        if not name or _is_junk_entity_name(name):
+        if not name or _is_junk_entity_name(name) or _looks_like_rule_name(name) or _looks_like_enum_value(name):
             continue
         key = _normalize_name(name)
         canonical = seen_names.get(key)
@@ -140,14 +145,47 @@ def _is_junk_entity_name(name: str) -> bool:
     return False
 
 
-def resolve_entities(entities: list[dict], model_config: dict, model_name: str) -> dict[str, str]:
+_RULE_NAME_SUFFIXES = ("规则", "政策", "办法", "制度", "准则", "细则", "规程")
+
+
+def _looks_like_rule_name(name: str) -> bool:
+    """A business rule/policy (e.g. "促销定价规则") is not an entity — it
+    belongs in logic_rules, not the concept graph."""
+    return name.endswith(_RULE_NAME_SUFFIXES)
+
+
+# A letter (+ optional 1-2 digits) followed by a small closed set of
+# tier/stage/round markers, and nothing else — the shape of an enumeration
+# VALUE of some concept's property (信用分层's "A层", 逾期阶段's "M0"/"M1+",
+# 融资轮次's "D轮融资"), not a concept in its own right.
+_ENUM_VALUE_PATTERN = re.compile(
+    r"^[A-Za-z]{1,2}[+-]?(轮融资|阶段|层|级|档|类)$|^M\d{1,2}\+?(阶段)?$"
+)
+
+
+def _looks_like_enum_value(name: str) -> bool:
+    return bool(_ENUM_VALUE_PATTERN.match(name))
+
+
+def resolve_entities(
+    entities: list[dict], model_config: dict, model_name: str,
+    existing_entities: list[dict] | None = None,
+) -> dict[str, str]:
     """Cross-document entity resolution (graph-engineering playbook, resolution
     stage): within each entity type, cluster surface-form variants of the same
     real-world concept using the extraction-time descriptions as disambiguation
     context — catches cases exact-name matching misses (abbreviation vs full
     name, alias vs formal name across files).  Returns an alias map
     {raw_name_cn: canonical_name_cn} covering every input name; unmatched names
-    and failed calls fall back to identity so no entity is ever silently lost."""
+    and failed calls fall back to identity so no entity is ever silently lost.
+
+    `existing_entities` (playbook incremental-update guidance: resolve new
+    entities against the existing canonical set, not against each other) are
+    entities already saved on this ontology from a prior run. They are never
+    renamed — if a new entity clusters with one of them, that existing
+    entity's name_cn is forced as the canonical, so re-running extraction
+    never silently relabels an already-published entity out from under its
+    existing relations/instances."""
     alias_map: dict[str, str] = {}
     by_type: dict[str, list[dict]] = {}
     for e in entities:
@@ -157,21 +195,43 @@ def resolve_entities(entities: list[dict], model_config: dict, model_name: str) 
         alias_map[name] = name
         by_type.setdefault(e.get("type") or "", []).append(e)
 
+    existing_by_type: dict[str, list[dict]] = {}
+    existing_names: set[str] = set()
+    for e in existing_entities or []:
+        name = e.get("name_cn")
+        if not name:
+            continue
+        existing_names.add(name)
+        existing_by_type.setdefault(e.get("type") or "", []).append(e)
+
     provider = model_config.get("provider", "openai")
     api_key = model_config.get("api_key", "")
     api_base = model_config.get("api_base")
 
     for etype, group in by_type.items():
-        if len(group) < 2:
+        existing_group = existing_by_type.get(etype, [])
+        if len(group) + len(existing_group) < 2:
             continue
         entity_list = "\n".join(
             f"- {e['name_cn']}: {(e.get('description') or '').strip()[:100]}" for e in group
+        )
+        if existing_group:
+            entity_list += "\n" + "\n".join(
+                f"- [已存在] {e['name_cn']}: {(e.get('description') or '').strip()[:100]}"
+                for e in existing_group
+            )
+        incremental_rule = (
+            "\n标记为 [已存在] 的实体是本体里已经发布的规范实体：如果某个未标记的新实体与其属于"
+            "同一概念，该簇的 canonical 必须使用 [已存在] 实体的名字（去掉标记），绝不能改名或"
+            "另选一个新名字。"
+            if existing_group else ""
         )
         system_prompt = (
             f"你是实体消歧专家。下面是同一类型（{etype or '未分类'}）从文档中提取的实体，"
             "其中部分可能是同一概念的不同写法（如全称/简称、中英文并列、别名）。请聚类："
             "每个输入名称必须出现在且仅出现在一个簇的 aliases 中；确实不同的概念各自单独成簇；"
-            "结合描述判断，不要仅凭字面相似合并不同概念；canonical 取信息最完整、无歧义的写法。\n\n"
+            "结合描述判断，不要仅凭字面相似合并不同概念；canonical 取信息最完整、无歧义的写法。"
+            f"{incremental_rule}\n\n"
             '只返回 JSON：{"clusters": [{"canonical": "规范名", "aliases": ["写法1", "写法2"]}]}'
         )
         messages = [
@@ -183,15 +243,25 @@ def resolve_entities(entities: list[dict], model_config: dict, model_name: str) 
         except Exception:
             continue  # resolution is best-effort; keep identity mapping on failure
         group_names = {e["name_cn"] for e in group}
+        existing_group_names = {e["name_cn"] for e in existing_group}
+        all_names = group_names | existing_group_names
         for cluster in (parsed.get("clusters") or []) if isinstance(parsed, dict) else []:
             if not isinstance(cluster, dict):
                 continue
             canonical = _clean_entity_name(cluster.get("canonical"))
-            if not canonical or canonical not in group_names:
+            aliases = [_clean_entity_name(a) for a in (cluster.get("aliases") or [])]
+            aliases = [a for a in aliases if a and a in all_names]
+            # an existing (already-published) entity in this cluster always
+            # wins the canonical slot, regardless of what the model picked
+            existing_in_cluster = [a for a in aliases if a in existing_group_names] + (
+                [canonical] if canonical in existing_group_names else []
+            )
+            if existing_in_cluster:
+                canonical = existing_in_cluster[0]
+            elif not canonical or canonical not in group_names:
                 continue
-            for alias in cluster.get("aliases") or []:
-                alias = _clean_entity_name(alias)
-                if alias and alias in group_names:
+            for alias in aliases:
+                if alias in group_names:  # only remap names from this run's own entities
                     alias_map[alias] = canonical
     return alias_map
 
@@ -317,6 +387,51 @@ def infer_relations(entities: list, existing_relations: list, text: str,
         return new_rels
     except Exception:
         return []  # relation inference failure is non-fatal
+
+
+def summarize_entity(
+    name: str, description: str, relations_text: str, model_config: dict, model_name: str,
+) -> dict | None:
+    """Hub-node profile synthesis (graph-engineering playbook, Section V.A):
+    for a high-degree entity, synthesize a 2-3 paragraph summary, 3-5 atomic
+    traceable key facts, and a time range from its grounded description and
+    its known graph relations. Returns None on failure — summarization is
+    best-effort and never blocks extraction."""
+    provider = model_config.get("provider", "openai")
+    api_key = model_config.get("api_key", "")
+    api_base = model_config.get("api_base")
+
+    system_prompt = (
+        f"为本体实体「{name}」生成知识图谱画像。\n\n"
+        f"已知描述：{description or '（无）'}\n\n"
+        f"该实体在图中的已知关系：\n{relations_text or '（无）'}\n\n"
+        "基于以上信息写一段2-3段的事实性综合描述；如信息有冲突，优先采用更具体的说法；"
+        "提炼3-5条可溯源到上述描述/关系的原子关键事实；不要编造描述和关系之外没有支持的事实；"
+        "时间范围用 YYYY 或 YYYY-MM 格式，没有明确时间信息就填 \"unknown\"。\n\n"
+        '只返回 JSON：{"summary": "...", "key_facts": ["...", "..."], '
+        '"time_range": {"start": "...", "end": "..."}}'
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"实体：{name}"},
+    ]
+    try:
+        parsed = _parse_response(_call_llm(provider, api_key, api_base, model_name, messages))
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    time_range = parsed.get("time_range")
+    if not isinstance(time_range, dict):
+        time_range = {"start": "unknown", "end": "unknown"}
+    return {
+        "summary": str(parsed.get("summary") or ""),
+        "key_facts": [f for f in (parsed.get("key_facts") or []) if isinstance(f, str)][:5],
+        "time_range": {
+            "start": str(time_range.get("start") or "unknown"),
+            "end": str(time_range.get("end") or "unknown"),
+        },
+    }
 
 
 def _call_llm(provider: str, api_key: str, api_base: str | None, model: str, messages: list, json_mode: bool = True) -> str:

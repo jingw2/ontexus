@@ -65,7 +65,7 @@ function createApiClient(baseURL: string, options?: { runtimeDelegation?: boolea
           return client(config)
         }
       }
-      if (!options?.runtimeDelegation && !options?.preserveSessionOnAuthorizationFailure && (status === 401 || status === 403)) {
+      if (!options?.runtimeDelegation && !options?.preserveSessionOnAuthorizationFailure && status === 401) {
         useAuthStore.getState().logout()
       }
       if (options?.runtimeDelegation && status === 401) {

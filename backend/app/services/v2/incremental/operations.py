@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.v2.connection import Connection
+from app.models.v2.dataset import Dataset
 from app.models.v2.pipeline import PipelineRunInput
 from app.models.v2.refresh import (
     RefreshDeadLetter,
@@ -39,10 +40,12 @@ from app.services.v2.incremental.operability import (
     collect_refresh_operability,
 )
 from app.services.v2.scheduler.schedule_service import (
-    DEFAULT_RESOURCE,
     ScheduleRequest,
     upsert_refresh_schedule,
 )
+
+
+_LEGACY_RESOURCE_SENTINEL = "__scheduled__"
 
 
 class RefreshRunView(BaseModel):
@@ -147,25 +150,76 @@ def _source_state(
     ).scalars().first()
 
 
-def _source_resource(
-    db: Session, *, source_id: str, resource: str | None = None,
-) -> str:
-    if resource:
-        return resource
-    state = _source_state(db, source_id=source_id)
-    if state is not None:
-        return state.resource
+def resolve_refresh_resource(db: Session, *, source_id: str) -> str:
+    """Resolve one concrete resource owned by a saved connection.
+
+    The resolver deliberately evaluates one precedence level at a time.  A
+    later source of truth cannot hide an ambiguity in an earlier one, and the
+    historical ``__scheduled__`` placeholder is never a candidate.
+    """
     connection = db.get(Connection, source_id)
     if connection is None:
         raise RefreshError("SOURCE_NOT_FOUND", f"no source connection {source_id}")
+
+    def candidates(values: list[object]) -> list[str]:
+        return sorted({str(value).strip() for value in values if value is not None and str(value).strip()})
+
     # Fail closed: an `_encrypted` config that cannot be decrypted must
-    # never be silently treated as "no resource hint configured" -- that
-    # would resolve to DEFAULT_RESOURCE and let a manual refresh trigger
-    # create a RefreshSourceState/RefreshRun for the wrong resource instead
-    # of surfacing the broken configuration. Credentials are never
-    # accepted from this request path; only the resource hint is read.
+    # never be silently treated as "no resource hint configured". Credentials
+    # are never accepted from this request path; only the resource hint is
+    # read.
     raw = _connection_configuration(connection)
-    return str(raw.get("resource") or raw.get("table") or DEFAULT_RESOURCE)
+    configured = candidates([raw.get("resource"), raw.get("table")])
+    configured = [value for value in configured if value != _LEGACY_RESOURCE_SENTINEL]
+    if len(configured) > 1:
+        raise RefreshError(
+            "REFRESH_RESOURCE_AMBIGUOUS",
+            f"connection {source_id} has multiple configured resources",
+        )
+    if configured:
+        return configured[0]
+
+    state_resources = candidates(db.execute(
+        select(RefreshSourceState.resource).where(
+            RefreshSourceState.source_id == source_id,
+            RefreshSourceState.resource != _LEGACY_RESOURCE_SENTINEL,
+        ).distinct()
+    ).scalars().all())
+    if len(state_resources) > 1:
+        raise RefreshError(
+            "REFRESH_RESOURCE_AMBIGUOUS",
+            f"connection {source_id} has multiple refresh resource states",
+        )
+    if state_resources:
+        return state_resources[0]
+
+    dataset_resources = candidates(db.execute(
+        select(Dataset.name).where(
+            Dataset.source_connection_id == source_id,
+            Dataset.name != _LEGACY_RESOURCE_SENTINEL,
+        ).distinct()
+    ).scalars().all())
+    if len(dataset_resources) > 1:
+        raise RefreshError(
+            "REFRESH_RESOURCE_AMBIGUOUS",
+            f"connection {source_id} has multiple source datasets",
+        )
+    if dataset_resources:
+        return dataset_resources[0]
+
+    raise RefreshError(
+        "REFRESH_RESOURCE_REQUIRED",
+        f"connection {source_id} has no concrete refresh resource",
+    )
+
+
+def _source_resource(
+    db: Session, *, source_id: str, resource: str | None = None,
+) -> str:
+    """Backwards-compatible explicit-resource adapter for API callers."""
+    if resource:
+        return resource
+    return resolve_refresh_resource(db, source_id=source_id)
 
 
 def _connection_configuration(connection: Connection) -> dict[str, Any]:
@@ -624,6 +678,7 @@ def get_refresh_health(
 
 __all__ = [
     "RefreshRunView", "RefreshStatus", "RefreshScheduleView", "get_refresh_schedule",
+    "resolve_refresh_resource",
     "trigger_refresh", "cancel_refresh_run", "replay_refresh_run",
     "get_last_successful_refresh_run", "get_refresh_status", "get_refresh_health",
     "schedule_view", "update_refresh_schedule",

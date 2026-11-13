@@ -78,6 +78,9 @@ services:
     build: ./backend
     ports: ["8000:8000"]
     env_file: .env
+    # In-network clients use the container port, not the host's 8001 mapping.
+    environment: &chroma-environment
+      CHROMA_PORT: "8000"
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -103,6 +106,7 @@ services:
     env_file: .env
     profiles: ["refresh"]
     environment:
+      <<: *chroma-environment
       REFRESH_WORKER_CONCURRENCY: ${REFRESH_WORKER_CONCURRENCY:-2}
       REFRESH_WORKER_PREFETCH_MULTIPLIER: ${REFRESH_WORKER_PREFETCH_MULTIPLIER:-1}
       REFRESH_SOFT_TIME_LIMIT_SECONDS: ${REFRESH_SOFT_TIME_LIMIT_SECONDS:-300}
@@ -128,6 +132,7 @@ services:
     env_file: .env
     profiles: ["refresh"]
     environment:
+      <<: *chroma-environment
       REFRESH_WORKER_CONCURRENCY: ${REFRESH_WORKER_CONCURRENCY:-2}
       REFRESH_WORKER_PREFETCH_MULTIPLIER: ${REFRESH_WORKER_PREFETCH_MULTIPLIER:-1}
       REFRESH_SOFT_TIME_LIMIT_SECONDS: ${REFRESH_SOFT_TIME_LIMIT_SECONDS:-300}
@@ -153,6 +158,7 @@ services:
     env_file: .env
     profiles: ["refresh"]
     environment:
+      <<: *chroma-environment
       REFRESH_WORKER_CONCURRENCY: ${REFRESH_WORKER_CONCURRENCY:-2}
       REFRESH_WORKER_PREFETCH_MULTIPLIER: ${REFRESH_WORKER_PREFETCH_MULTIPLIER:-1}
       REFRESH_SOFT_TIME_LIMIT_SECONDS: ${REFRESH_SOFT_TIME_LIMIT_SECONDS:-300}
@@ -178,6 +184,7 @@ services:
     env_file: .env
     profiles: ["refresh"]
     environment:
+      <<: *chroma-environment
       REFRESH_WORKER_CONCURRENCY: ${REFRESH_WORKER_CONCURRENCY:-2}
       REFRESH_WORKER_PREFETCH_MULTIPLIER: ${REFRESH_WORKER_PREFETCH_MULTIPLIER:-1}
       REFRESH_SOFT_TIME_LIMIT_SECONDS: ${REFRESH_SOFT_TIME_LIMIT_SECONDS:-300}
@@ -202,6 +209,7 @@ services:
     build: ./backend
     env_file: .env
     profiles: ["artifact"]
+    environment: *chroma-environment
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -220,6 +228,7 @@ services:
     build: ./backend
     env_file: .env
     profiles: ["agent"]
+    environment: *chroma-environment
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -238,6 +247,7 @@ services:
     build: ./backend
     env_file: .env
     profiles: ["housekeeping"]
+    environment: *chroma-environment
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -255,6 +265,7 @@ services:
   celery_beat:
     build: ./backend
     env_file: .env
+    environment: *chroma-environment
     depends_on:
       migration:
         condition: service_completed_successfully

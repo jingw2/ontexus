@@ -133,8 +133,13 @@ def test_zz_extraction_rejects_unknown_model_with_stable_error(imports_db):
     from app.routers import extraction
     from app.services.auth_service import create_access_token
 
+    from app.services.ontology_access import backfill_creator_grants
+
     Session, _ = imports_db
     actor_id, ontology_id = _seed(imports_db)
+    # _seed inserts via direct SQL, bypassing create_ontology's creator grant
+    with Session() as session:
+        backfill_creator_grants(session)
     token = create_access_token({"sub": actor_id, "role": "editor"})
     headers = {"Authorization": f"Bearer {token}"}
 

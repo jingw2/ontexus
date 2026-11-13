@@ -22,6 +22,10 @@ interface Props {
 }
 
 export default function V2DefinitionEditor({ ontologyId, kind }: Props) {
+  return <DefinitionEditorContent key={`${ontologyId}:${kind}`} ontologyId={ontologyId} kind={kind} />
+}
+
+function DefinitionEditorContent({ ontologyId, kind }: Props) {
   const { t } = useTranslation()
   const [items, setItems] = useState<Definition[]>([])
   const [selected, setSelected] = useState<Definition | null>(null)
@@ -39,7 +43,13 @@ export default function V2DefinitionEditor({ ontologyId, kind }: Props) {
     }
   }
 
-  useEffect(() => { void load() }, [ontologyId, kind]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let cancelled = false
+    void apiClientV2.get<Definition[]>(`/ontologies/${ontologyId}/${kind}`)
+      .then(rows => { if (!cancelled) setItems(Array.isArray(rows) ? rows : []) })
+      .catch(() => { if (!cancelled) setError(t('v2def.load_failed')) })
+    return () => { cancelled = true }
+  }, [ontologyId, kind, t])
 
   const select = (item: Definition) => {
     setSelected(item)

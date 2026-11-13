@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 import uuid
 
 logger = logging.getLogger(__name__)
+
+from app.services.connection.config import build_connector_config, safe_connection_error
+from app.services.connection.registry import get_connector
 
 
 def get_celery_app():
@@ -202,6 +205,7 @@ def _find_dataset_for_file(db, filename: str):
 
 
 def _collect_sources(db, pl) -> list[dict]:
+    from app.models.v2.connection import Connection
     from app.models.v2.dataset import Dataset
 
     sources: list[dict] = []
@@ -209,7 +213,29 @@ def _collect_sources(db, pl) -> list[dict]:
     for node in definition.get("nodes") or []:
         if node.get("type") != "connector":
             continue
-        for file_info in (node.get("config") or {}).get("files", []) or []:
+        config = node.get("config") or {}
+        source_type = str(config.get("source_type") or "").lower()
+        if source_type in {"mysql", "postgres", "postgresql"}:
+            connection_id = str(config.get("connection_id") or "")
+            resource = str(config.get("resource") or config.get("table") or "")
+            if not connection_id:
+                raise ValueError("Database connector must select a saved connection")
+            if not resource:
+                raise ValueError("Database connector must select a table")
+            connection = db.get(Connection, connection_id)
+            if connection is None:
+                raise ValueError(f"Saved connection not found: {connection_id}")
+            sources.append({
+                "connection_id": connection.id,
+                "resource": resource,
+                "filename": resource,
+                "route": "A",
+                "kind": "structured",
+                "dataset_id": None,
+            })
+            continue
+
+        for file_info in config.get("files", []) or []:
             filename = file_info.get("name") or file_info.get("filename") or ""
             dataset_id = file_info.get("dataset_id")
             ds = db.query(Dataset).filter(Dataset.id == dataset_id).first() if dataset_id else None
@@ -237,11 +263,144 @@ def _collect_sources(db, pl) -> list[dict]:
     seen: set[str] = set()
     unique_sources = []
     for source in sources:
-        if source["dataset_id"] in seen:
+        key = source.get("dataset_id") or (
+            f"connection:{source.get('connection_id')}:{source.get('resource')}"
+        )
+        if key in seen:
             continue
-        seen.add(source["dataset_id"])
+        seen.add(key)
         unique_sources.append(source)
     return unique_sources
+
+
+def _existing_database_dataset(db, connection_id: str, resource: str):
+    from app.models.v2.dataset import Dataset
+
+    return db.query(Dataset).filter(
+        Dataset.source_connection_id == connection_id,
+        Dataset.name == resource,
+    ).order_by(Dataset.created_at.desc()).first()
+
+
+def _pinned_database_version(db, dataset_id: str, input_dataset_version_ids) -> object | None:
+    if not input_dataset_version_ids:
+        return None
+    from app.models.v2.dataset import DatasetVersion
+
+    for version_id in input_dataset_version_ids:
+        version = db.get(DatasetVersion, version_id)
+        if version is not None and version.dataset_id == dataset_id:
+            return version
+    return None
+
+
+def _resolve_pinned_input_versions(db, sources: list[dict], input_dataset_version_ids) -> dict[int, object]:
+    """Resolve one immutable input version for every source before any pull.
+
+    A refresh-triggered pipeline must not silently fill a missing source pin
+    from a current/latest dataset version.  SQL sources may not have a
+    materialized Dataset until their first unpinned run, so their candidate
+    Dataset rows are resolved by the saved connection/resource identity.
+    """
+    if not input_dataset_version_ids:
+        return {}
+
+    from app.models.v2.dataset import Dataset, DatasetVersion
+
+    requested_ids = list(input_dataset_version_ids)
+    versions = db.query(DatasetVersion).filter(DatasetVersion.id.in_(set(requested_ids))).all()
+    versions_by_id = {version.id: version for version in versions}
+    resolved: dict[int, object] = {}
+
+    for source in sources:
+        dataset_ids: set[str] = set()
+        if source.get("dataset_id"):
+            dataset_ids.add(source["dataset_id"])
+        elif source.get("connection_id"):
+            datasets = db.query(Dataset).filter(
+                Dataset.source_connection_id == source["connection_id"],
+                Dataset.name == source["resource"],
+            ).all()
+            dataset_ids.update(dataset.id for dataset in datasets)
+
+        matches = [
+            versions_by_id[version_id]
+            for version_id in requested_ids
+            if version_id in versions_by_id
+            and versions_by_id[version_id].dataset_id in dataset_ids
+        ]
+        if len(matches) != 1:
+            source_name = source.get("resource") or source.get("filename") or "unknown"
+            raise ValueError(
+                "PINNED_INPUTS_INCOMPLETE: source "
+                f"{source_name!r} requires exactly one pinned dataset version"
+            )
+        resolved[id(source)] = matches[0]
+
+    return resolved
+
+
+def _snapshot_database_source(
+    db, svc, source: dict, input_dataset_version_ids, selected_version=None,
+) -> object:
+    """Materialize a selected SQL table as an immutable DatasetVersion.
+
+    A refresh-triggered run can provide an exact pinned version; in that case
+    the live table is never read again.  Manual runs without a pin read the
+    selected resource once and persist a new snapshot before Route A loads it.
+    """
+    from app.models.v2.connection import Connection
+    from app.models.v2.dataset import Dataset
+
+    connection = db.get(Connection, source["connection_id"])
+    if connection is None:
+        raise ValueError(f"Saved connection not found: {source['connection_id']}")
+    dataset = _existing_database_dataset(db, connection.id, source["resource"])
+    if selected_version is not None:
+        # A pinned SQL version is already immutable.  Reuse it directly and
+        # recover the Dataset identity without touching the live connector.
+        if dataset is None:
+            dataset = db.get(Dataset, selected_version.dataset_id)
+        if (
+            dataset is None
+            or dataset.id != selected_version.dataset_id
+            or dataset.source_connection_id != connection.id
+            or dataset.name != source["resource"]
+        ):
+            raise ValueError(
+                "PINNED_INPUTS_INCOMPLETE: pinned version does not belong to "
+                f"{connection.id}/{source['resource']}"
+            )
+        source["dataset_id"] = dataset.id
+        return selected_version
+    if dataset is not None:
+        pinned = _pinned_database_version(db, dataset.id, input_dataset_version_ids)
+        if pinned is not None:
+            source["dataset_id"] = dataset.id
+            return pinned
+
+    config = build_connector_config(
+        connection.kind, connection.config, resource=source["resource"],
+    )
+    # A pipeline table selector is authoritative.  Do not allow an optional
+    # saved query to redirect it to an arbitrary statement.
+    config.pop("query", None)
+    connector = get_connector(connection.kind, config)
+    rows = connector.pull_full(source["resource"])
+    if isinstance(rows, Mapping):
+        rows = [dict(rows)]
+    else:
+        rows = [dict(row) for row in (rows or [])]
+
+    if dataset is None:
+        dataset = svc.create_dataset(
+            name=source["resource"], kind="structured", connection_id=connection.id,
+        )
+    version = svc.create_version(
+        dataset.id, _safe_csv_bytes(rows), rowcount=len(rows),
+    )
+    source["dataset_id"] = dataset.id
+    return version
 
 
 def _load_source_rows(
@@ -273,8 +432,14 @@ def _load_source_rows(
         }]
     if version is None:
         return []
+    # A database snapshot is already a bounded, immutable input selected by
+    # the pipeline.  Loading only the preview cap would silently drop rows
+    # from the pipeline, so request the complete version for DB sources while
+    # retaining the existing preview cap for file sources.
+    preview_limit = None if source.get("connection_id") else limit
     return svc.preview(
-        source["dataset_id"], version.version_no, limit=limit, version_id=version.id,
+        source["dataset_id"], version.version_no,
+        limit=preview_limit, version_id=version.id,
     )
 
 
@@ -375,6 +540,21 @@ def _save_curated_outputs(db, svc, pl, source: dict, data: list[dict], ctx, mult
     return [_save_curated_dataset(db, svc, pl, source, data, ctx, multi_source)]
 
 
+def _set_pipeline_status_if_latest(db, pipeline, run, status: str) -> bool:
+    """Update the pipeline summary only for the newest deterministic run."""
+    from app.models.v2.pipeline import PipelineRun
+
+    latest = db.query(PipelineRun).filter(
+        PipelineRun.pipeline_id == run.pipeline_id,
+    ).order_by(
+        PipelineRun.created_at.desc(), PipelineRun.id.desc(),
+    ).first()
+    if latest is None or latest.id != run.id:
+        return False
+    pipeline.status = status
+    return True
+
+
 def pipeline_run_task(
     pipeline_id: str, run_id: str,
     input_dataset_version_ids: Sequence[str] | None = None,
@@ -382,20 +562,18 @@ def pipeline_run_task(
     """Pipeline 执行任务 — 支持 DAG 编译 + 节点状态追踪"""
     from app.database import SessionLocal
     from app.models.v2.pipeline import Pipeline, PipelineRun, PipelineRunInput
-    from app.models.v2.dataset import DatasetVersion
     from app.services.v2.pipeline.base import PipelineContext
     from app.services.v2.pipeline.dag_compiler import compile_definition
     from app.services.v2.dataset_service import DatasetService
     from app.services.v2.incremental.polling import select_pinned_dataset_version
 
     db = SessionLocal()
+    run = None
+    pl = None
     try:
         run = db.query(PipelineRun).filter(PipelineRun.id == run_id).first()
         if not run:
             return
-        run.status = "running"
-        run.started_at = datetime.now(timezone.utc)
-        db.commit()
 
         pl = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
         if not pl:
@@ -403,6 +581,11 @@ def pipeline_run_task(
             run.error_log = "Pipeline not found"
             db.commit()
             return
+
+        run.status = "running"
+        run.started_at = datetime.now(timezone.utc)
+        _set_pipeline_status_if_latest(db, pl, run, "running")
+        db.commit()
 
         # ── DAG 编译 ──────────────────────────────────────────────
         definition = pl.definition
@@ -433,30 +616,40 @@ def pipeline_run_task(
         else:
             input_dataset_version_ids = list(input_dataset_version_ids)
         lineage_version_ids = list(input_dataset_version_ids)
+        pinned_versions = _resolve_pinned_input_versions(
+            db, sources, input_dataset_version_ids,
+        )
         if input_dataset_version_ids:
             run.dataset_version_id = input_dataset_version_ids[0]
             db.commit()
 
         transform_route, runtime_spec = _pipeline_runtime_config(pl)
 
-        if sources and not pl.source_dataset_id:
-            pl.source_dataset_id = sources[0]["dataset_id"]
-            db.commit()
-
         outputs = []
         multi_source = len(sources) > 1
         for source in sources:
+            pinned_version = pinned_versions.get(id(source))
+            if source.get("connection_id"):
+                source_version = _snapshot_database_source(
+                    db, svc, source, input_dataset_version_ids,
+                    selected_version=pinned_version,
+                )
+            else:
+                source_version = pinned_version
+            # SQL source identity is only known after its first snapshot.
+            # A multi-source pipeline cannot be represented by this one-source
+            # refresh binding; never silently bind it to the first input.
+            if not multi_source and not pl.source_dataset_id and source.get("dataset_id"):
+                pl.source_dataset_id = source["dataset_id"]
+                db.commit()
             source["route"] = _source_runtime_route(source, transform_route, pl.route)
-            source_version_ids = []
-            for version_id in input_dataset_version_ids:
-                version = db.get(DatasetVersion, version_id)
-                if version is not None and version.dataset_id == source["dataset_id"]:
-                    source_version_ids.append(version.id)
-            source_version = select_pinned_dataset_version(
-                db,
-                dataset_id=source["dataset_id"],
-                input_dataset_version_ids=source_version_ids or None,
-            )
+            source_version_ids = [source_version.id] if pinned_version is not None else []
+            if source_version is None:
+                source_version = select_pinned_dataset_version(
+                    db,
+                    dataset_id=source["dataset_id"],
+                    input_dataset_version_ids=source_version_ids or None,
+                )
             data = _load_source_rows(
                 db, svc, source,
                 input_dataset_version_ids=source_version_ids or None,
@@ -544,17 +737,20 @@ def pipeline_run_task(
             "curated_dataset_id": curated_ids[0] if curated_ids else None,
             "curated_dataset_ids": curated_ids,
         }
+        _set_pipeline_status_if_latest(db, pl, run, "published")
         db.commit()
 
     except Exception as e:
-        logger.error(f"Pipeline run failed: {e}")
+        detail = safe_connection_error(e)
+        logger.error("Pipeline run failed: %s", detail)
         if run:
             run.status = "failed"
-            run.error_log = str(e)
+            run.error_log = detail
             run.finished_at = datetime.now(timezone.utc)
             stats = dict(run.stats or {})
             stats.setdefault("node_status", {})
             run.stats = stats
+            _set_pipeline_status_if_latest(db, pl, run, "failed")
             db.commit()
     finally:
         db.close()

@@ -207,6 +207,22 @@ describe('P2C-TOOLS', () => {
     expect(bindings[0].enabled_categories).not.toContain('logic')
   })
 
+  it('clears a stale conflict banner once the ontology is unbound', async () => {
+    toolsHandlers()
+    server.use(
+      http.post('*/api/v1/agents/a-1/tool-validation', () =>
+        HttpResponse.json({ data: { valid: false, blocked: ['o-1'], capabilities: [] }, message: 'ok' })),
+    )
+    renderTab()
+    await screen.findByTestId('ontology-picker')
+    await pickOntology('Supply Ontology')
+    expect(await screen.findByText('绑定配置存在冲突')).toBeTruthy()
+    // the blocked ontology is named, with the actual fix (a data grant), not a bare id
+    expect(screen.getByText(/没有以下本体的数据授权.*Supply Ontology.*联系管理员/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '解绑' }))
+    await waitFor(() => expect(screen.queryByText('绑定配置存在冲突')).toBeNull())
+  })
+
   it('binds at most one ontology: the picker locks once bound, unbind to switch', async () => {
     toolsHandlers()
     server.use(

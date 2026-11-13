@@ -5,6 +5,7 @@ import {
   Table2, BarChart3, Database
 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
+import { useAuthStore } from '@/stores/authStore'
 
 interface CuratedDataset {
   id: string
@@ -49,6 +50,7 @@ const scoreColor = (s: number) =>
 
 export default function CuratedTab() {
   const { t } = useTranslation()
+  const canReview = useAuthStore(s => s.user?.role === 'admin')
   const [datasets, setDatasets] = useState<CuratedDataset[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -103,6 +105,7 @@ export default function CuratedTab() {
   }
 
   const handleReview = async (id: string, action: 'approve' | 'reject') => {
+    if (!canReview) return
     setReviewing(id)
     try {
       await apiClientV2.post(`/curated/${id}/review?action=${action}`)
@@ -177,7 +180,7 @@ export default function CuratedTab() {
                   </div>
 
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    {isPending && (
+                    {canReview && isPending && (
                       <>
                         <button
                           onClick={() => handleReview(ds.id, 'approve')}

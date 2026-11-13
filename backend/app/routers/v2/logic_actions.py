@@ -12,6 +12,7 @@ from app.services.publication.working_copy import OntologyWorkingCopyService
 from app.models.user import User
 from app.models.v2.logic import OntologyLogicRule, OntologyStateMachine
 from app.models.v2.action import OntologyActionType, OntologyActionRun
+from app.services.ontology_access import GrantDenied, require_project_grant
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -21,6 +22,20 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _require_read(ontology_id: str, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    try:
+        require_project_grant(db, actor, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
+
+def _require_edit(ontology_id: str, db: Session = Depends(get_db), actor: User = Depends(require_editor)):
+    try:
+        require_project_grant(db, actor, ontology_id, "edit")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
 
 
 # ── Logic Rules ─────────────────────────────────────────────────
@@ -59,7 +74,7 @@ class LogicTestRequest(BaseModel):
     parameters: dict = {}
 
 
-@router.get("/{ontology_id}/logic")
+@router.get("/{ontology_id}/logic", dependencies=[Depends(_require_read)])
 def list_logic_rules(ontology_id: str, logic_type: str = "", db: Session = Depends(get_db)):
     q = db.query(OntologyLogicRule).filter(OntologyLogicRule.ontology_id == ontology_id)
     if logic_type:
@@ -73,7 +88,7 @@ def list_logic_rules(ontology_id: str, logic_type: str = "", db: Session = Depen
             for r in rules]
 
 
-@router.post("/{ontology_id}/logic", status_code=201)
+@router.post("/{ontology_id}/logic", status_code=201, dependencies=[Depends(_require_edit)])
 def create_logic_rule(ontology_id: str, body: LogicRuleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     def _write():
         rule = OntologyLogicRule(
@@ -87,7 +102,7 @@ def create_logic_rule(ontology_id: str, body: LogicRuleCreate, db: Session = Dep
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2logic.create", callback=_write)
 
 
-@router.put("/{ontology_id}/logic/{rule_id}")
+@router.put("/{ontology_id}/logic/{rule_id}", dependencies=[Depends(_require_edit)])
 def update_logic_rule(ontology_id: str, rule_id: str, body: LogicRuleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     rule = db.query(OntologyLogicRule).filter(
         OntologyLogicRule.id == rule_id, OntologyLogicRule.ontology_id == ontology_id
@@ -102,7 +117,7 @@ def update_logic_rule(ontology_id: str, rule_id: str, body: LogicRuleCreate, db:
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2logic.update", callback=_write)
 
 
-@router.patch("/{ontology_id}/logic/{rule_id}")
+@router.patch("/{ontology_id}/logic/{rule_id}", dependencies=[Depends(_require_edit)])
 def patch_logic_rule(ontology_id: str, rule_id: str, body: LogicRulePatch, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     rule = db.query(OntologyLogicRule).filter(
         OntologyLogicRule.id == rule_id, OntologyLogicRule.ontology_id == ontology_id
@@ -121,7 +136,7 @@ def patch_logic_rule(ontology_id: str, rule_id: str, body: LogicRulePatch, db: S
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2logic.patch", callback=_write)
 
 
-@router.post("/{ontology_id}/logic/{rule_id}/review")
+@router.post("/{ontology_id}/logic/{rule_id}/review", dependencies=[Depends(_require_edit)])
 def review_logic_rule(ontology_id: str, rule_id: str, body: LogicReviewRequest, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     rule = db.query(OntologyLogicRule).filter(
         OntologyLogicRule.id == rule_id, OntologyLogicRule.ontology_id == ontology_id
@@ -147,7 +162,7 @@ def review_logic_rule(ontology_id: str, rule_id: str, body: LogicReviewRequest, 
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2logic.review", callback=_write)
 
 
-@router.post("/{ontology_id}/logic/{rule_id}/test")
+@router.post("/{ontology_id}/logic/{rule_id}/test", dependencies=[Depends(_require_read)])
 def test_logic_rule(ontology_id: str, rule_id: str, body: LogicTestRequest, db: Session = Depends(get_db), _=Depends(require_editor)):
     rule = db.query(OntologyLogicRule).filter(
         OntologyLogicRule.id == rule_id, OntologyLogicRule.ontology_id == ontology_id
@@ -157,7 +172,7 @@ def test_logic_rule(ontology_id: str, rule_id: str, body: LogicTestRequest, db: 
     return {"rule_id": rule.id, **_evaluate_logic_rule(rule, body.row or {}, body.parameters or {})}
 
 
-@router.delete("/{ontology_id}/logic/{rule_id}")
+@router.delete("/{ontology_id}/logic/{rule_id}", dependencies=[Depends(_require_edit)])
 def delete_logic_rule(ontology_id: str, rule_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     rule = db.query(OntologyLogicRule).filter(
         OntologyLogicRule.id == rule_id, OntologyLogicRule.ontology_id == ontology_id
@@ -170,7 +185,7 @@ def delete_logic_rule(ontology_id: str, rule_id: str, db: Session = Depends(get_
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2logic.delete", callback=_write)
 
 
-@router.post("/{ontology_id}/logic/publish")
+@router.post("/{ontology_id}/logic/publish", dependencies=[Depends(_require_edit)])
 def publish_logic_rules_v2(ontology_id: str, db: Session = Depends(get_db), _=Depends(require_editor)):
     """Direct tool publication is closed; use the Ontology compiler (P1C)."""
     raise HTTPException(status_code=403, detail="PUBLICATION_NOT_ENABLED")
@@ -197,7 +212,7 @@ def publish_logic_rules_v2(ontology_id: str, db: Session = Depends(get_db), _=De
 
 # ── Logic: Discovery ────────────────────────────────────────────
 
-@router.post("/{ontology_id}/logic/discover")
+@router.post("/{ontology_id}/logic/discover", dependencies=[Depends(_require_edit)])
 def discover_logic_rules(ontology_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     """发现 Logic Rules（同步写入 v2 + v1 表，供前端 LogicTab 读取）"""
     from app.services.v2.mapping.mapping_service import MappingService
@@ -268,7 +283,7 @@ def discover_logic_rules(ontology_id: str, db: Session = Depends(get_db), curren
 
 # ── State Machines ──────────────────────────────────────────────
 
-@router.get("/{ontology_id}/state-machines")
+@router.get("/{ontology_id}/state-machines", dependencies=[Depends(_require_read)])
 def list_state_machines(ontology_id: str, db: Session = Depends(get_db)):
     machines = db.query(OntologyStateMachine).filter(
         OntologyStateMachine.ontology_id == ontology_id
@@ -319,7 +334,7 @@ class ActionReviewRequest(BaseModel):
     notes: str = ""
 
 
-@router.get("/{ontology_id}/actions")
+@router.get("/{ontology_id}/actions", dependencies=[Depends(_require_read)])
 def list_action_types(ontology_id: str, category: str = "", db: Session = Depends(get_db)):
     q = db.query(OntologyActionType).filter(OntologyActionType.ontology_id == ontology_id)
     if category:
@@ -334,7 +349,7 @@ def list_action_types(ontology_id: str, category: str = "", db: Session = Depend
              "created_at": a.created_at.isoformat() if a.created_at else None} for a in actions]
 
 
-@router.post("/{ontology_id}/actions", status_code=201)
+@router.post("/{ontology_id}/actions", status_code=201, dependencies=[Depends(_require_edit)])
 def create_action_type(ontology_id: str, body: ActionTypeCreate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     def _write():
         act = OntologyActionType(
@@ -349,7 +364,7 @@ def create_action_type(ontology_id: str, body: ActionTypeCreate, db: Session = D
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2action.create", callback=_write)
 
 
-@router.patch("/{ontology_id}/actions/{action_id}")
+@router.patch("/{ontology_id}/actions/{action_id}", dependencies=[Depends(_require_edit)])
 def patch_action_type(ontology_id: str, action_id: str, body: ActionTypePatch, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     act = db.query(OntologyActionType).filter(
         OntologyActionType.id == action_id, OntologyActionType.ontology_id == ontology_id
@@ -368,7 +383,7 @@ def patch_action_type(ontology_id: str, action_id: str, body: ActionTypePatch, d
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2action.patch", callback=_write)
 
 
-@router.post("/{ontology_id}/actions/{action_id}/review")
+@router.post("/{ontology_id}/actions/{action_id}/review", dependencies=[Depends(_require_edit)])
 def review_action_type(ontology_id: str, action_id: str, body: ActionReviewRequest, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     act = db.query(OntologyActionType).filter(
         OntologyActionType.id == action_id, OntologyActionType.ontology_id == ontology_id
@@ -399,7 +414,7 @@ def review_action_type(ontology_id: str, action_id: str, body: ActionReviewReque
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2action.review", callback=_write)
 
 
-@router.post("/{ontology_id}/actions/discover")
+@router.post("/{ontology_id}/actions/discover", dependencies=[Depends(_require_edit)])
 def discover_actions(ontology_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     """发现 Actions（同步写入 v2 + v1 表，供前端 ActionsTab 读取）"""
     from app.services.v2.mapping.mapping_service import MappingService
@@ -457,7 +472,7 @@ def discover_actions(ontology_id: str, db: Session = Depends(get_db), current_us
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2action.discover", callback=_result)
 
 
-@router.delete("/{ontology_id}/actions/{action_id}")
+@router.delete("/{ontology_id}/actions/{action_id}", dependencies=[Depends(_require_edit)])
 def delete_action_type(ontology_id: str, action_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     act = db.query(OntologyActionType).filter(
         OntologyActionType.id == action_id, OntologyActionType.ontology_id == ontology_id
@@ -470,7 +485,7 @@ def delete_action_type(ontology_id: str, action_id: str, db: Session = Depends(g
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="v2action.delete", callback=_write)
 
 
-@router.post("/{ontology_id}/actions/publish")
+@router.post("/{ontology_id}/actions/publish", dependencies=[Depends(_require_edit)])
 def publish_actions_v2(ontology_id: str, db: Session = Depends(get_db), _=Depends(require_editor)):
     """Direct tool publication is closed; use the Ontology compiler (P1C)."""
     raise HTTPException(status_code=403, detail="PUBLICATION_NOT_ENABLED")
@@ -497,7 +512,7 @@ def publish_actions_v2(ontology_id: str, db: Session = Depends(get_db), _=Depend
 
 # ── Action Runs ─────────────────────────────────────────────────
 
-@router.get("/{ontology_id}/action-runs")
+@router.get("/{ontology_id}/action-runs", dependencies=[Depends(_require_read)])
 def list_action_runs(ontology_id: str, limit: int = 20, db: Session = Depends(get_db)):
     runs = db.query(OntologyActionRun).filter(
         OntologyActionRun.ontology_id == ontology_id
@@ -507,7 +522,7 @@ def list_action_runs(ontology_id: str, limit: int = 20, db: Session = Depends(ge
              "started_at": r.started_at.isoformat() if r.started_at else None} for r in runs]
 
 
-@router.post("/{ontology_id}/actions/{action_id}/run")
+@router.post("/{ontology_id}/actions/{action_id}/run", dependencies=[Depends(_require_edit)])
 def run_action_type(
     ontology_id: str,
     action_id: str,

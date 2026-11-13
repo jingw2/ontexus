@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import create_engine, inspect, text
 
 from app.services.connection.base import ConnectorBase, DeltaPage, records_to_delta_page
+from app.services.connection.config import safe_connection_error
 from app.schemas.refresh import SourceCursor
 
 # 合法 SQL 标识符：字母、数字、下划线、点（schema.table）；禁止空格/分号/引号/注释等
@@ -36,6 +37,7 @@ class SQLConnector(ConnectorBase):
     def __init__(self, config: dict):
         self._config = config
         self._engine = None
+        self.last_error: str | None = None
 
     def _get_engine(self):
         if self._engine is None:
@@ -50,8 +52,10 @@ class SQLConnector(ConnectorBase):
         try:
             with self._get_engine().connect() as conn:
                 conn.execute(text("SELECT 1"))
+            self.last_error = None
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = safe_connection_error(exc)
             return False
 
     def list_resources(self) -> list[str]:

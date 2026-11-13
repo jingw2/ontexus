@@ -5,13 +5,19 @@ from app.models.audit_task import AuditTask
 from app.models.ontology import OntologyProject
 from app.schemas.audit import AuditRequest, AuditTaskOut
 from app.services.publication.extraction_model_port import default_extraction_model_port
+from app.models.user import User
+from app.services.ontology_access import GrantDenied, require_project_grant
 import uuid
 
 router = APIRouter()
 
 
 @router.post("")
-def start_audit(ontology_id: str, body: AuditRequest, db: Session = Depends(get_db), _=Depends(require_editor)):
+def start_audit(ontology_id: str, body: AuditRequest, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
+    try:
+        require_project_grant(db, current_user, ontology_id, "edit")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
     project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not project:
         raise HTTPException(404, "Ontology not found")
@@ -50,7 +56,11 @@ def start_audit(ontology_id: str, body: AuditRequest, db: Session = Depends(get_
 
 
 @router.get("/status")
-def get_audit_status(ontology_id: str, task_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_audit_status(ontology_id: str, task_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        require_project_grant(db, current_user, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
     task = db.query(AuditTask).filter(AuditTask.id == task_id, AuditTask.ontology_id == ontology_id).first()
     if not task:
         raise HTTPException(404, "Audit task not found")

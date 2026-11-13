@@ -2,6 +2,8 @@ from app.models.entity import Entity
 from app.models.action import Action
 from app.models.logic import LogicRule
 from app.models.ontology import OntologyProject
+from app.models.user import User
+from app.services.ontology_access import creator_grant
 from app.models.v2.logic import OntologyLogicRule
 from app.models.v2.action import OntologyActionRun, OntologyActionType
 from app.routers.actions import publish_actions
@@ -203,6 +205,8 @@ def test_action_runtime_rejects_missing_required_parameter(db):
 
 def test_v1_logic_publish_syncs_v2_status(db):
     ontology_id = "ont-runtime-5"
+    actor = User(id="runtime", username="runtime", email="runtime@example.test", password_hash="unused", role="editor")
+    db.add(actor)
     db.add(OntologyProject(id=ontology_id, name=ontology_id, domain="test", created_by="runtime", security_domain_id="00000000-0000-0000-0000-000000000001"))
     db.add(LogicRule(
         id="logic-v1",
@@ -224,9 +228,10 @@ def test_v1_logic_publish_syncs_v2_status(db):
         status="draft",
     ))
     db.commit()
+    creator_grant(db, ontology_id, actor)
 
     with pytest.raises(HTTPException) as exc:
-        publish_logic_rules(ontology_id, db)
+        publish_logic_rules(ontology_id, db, actor)
     assert "PUBLICATION_NOT_ENABLED" in str(exc.value.detail)
     # direct tool publication is closed; nothing is published
     assert db.query(LogicRule).filter_by(id="logic-v1").first().status == "draft"
@@ -235,6 +240,8 @@ def test_v1_logic_publish_syncs_v2_status(db):
 
 def test_v1_action_publish_syncs_v2_status(db):
     ontology_id = "ont-runtime-6"
+    actor = User(id="runtime", username="runtime", email="runtime@example.test", password_hash="unused", role="editor")
+    db.add(actor)
     db.add(OntologyProject(id=ontology_id, name=ontology_id, domain="test", created_by="runtime", security_domain_id="00000000-0000-0000-0000-000000000001"))
     db.add(Action(
         id="action-v1",
@@ -254,9 +261,10 @@ def test_v1_action_publish_syncs_v2_status(db):
         status="draft",
     ))
     db.commit()
+    creator_grant(db, ontology_id, actor)
 
     with pytest.raises(HTTPException) as exc:
-        publish_actions(ontology_id, db)
+        publish_actions(ontology_id, db, actor)
     assert "PUBLICATION_NOT_ENABLED" in str(exc.value.detail)
     # direct tool publication is closed; nothing is published
     assert db.query(Action).filter_by(id="action-v1").first().status == "draft"

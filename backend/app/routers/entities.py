@@ -3,19 +3,29 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user, require_admin, require_editor
 from app.models.entity import Entity
 from app.models.user import User
+from app.services.ontology_access import GrantDenied, require_project_grant
 from app.services.publication.working_copy import OntologyWorkingCopyService
 from app.schemas.entity import EntityCreate, EntityUpdate, EntityOut
 import uuid
 
 router = APIRouter()
 
+
+def _grant(db: Session, actor: User, ontology_id: str, capability: str) -> dict:
+    try:
+        return require_project_grant(db, actor, ontology_id, capability)
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
 @router.get("")
-def list_entities(ontology_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_entities(ontology_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _grant(db, current_user, ontology_id, "read")
     items = db.query(Entity).filter(Entity.ontology_id == ontology_id).all()
     return {"data": [EntityOut.model_validate(e).model_dump() for e in items]}
 
 @router.post("", status_code=201)
 def create_entity(ontology_id: str, body: EntityCreate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
+    _grant(db, current_user, ontology_id, "edit")
     def _write():
         data = {k: v for k, v in body.model_dump().items() if v is not None}
         e = Entity(id=str(uuid.uuid4()), ontology_id=ontology_id, **data)
@@ -24,7 +34,8 @@ def create_entity(ontology_id: str, body: EntityCreate, db: Session = Depends(ge
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="entity.create", callback=_write)
 
 @router.get("/{entity_id}")
-def get_entity(ontology_id: str, entity_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_entity(ontology_id: str, entity_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _grant(db, current_user, ontology_id, "read")
     e = db.query(Entity).filter(Entity.id == entity_id, Entity.ontology_id == ontology_id).first()
     if not e:
         raise HTTPException(404, "Not found")
@@ -32,6 +43,7 @@ def get_entity(ontology_id: str, entity_id: str, db: Session = Depends(get_db), 
 
 @router.put("/{entity_id}")
 def update_entity(ontology_id: str, entity_id: str, body: EntityUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
+    _grant(db, current_user, ontology_id, "edit")
     e = db.query(Entity).filter(Entity.id == entity_id, Entity.ontology_id == ontology_id).first()
     if not e:
         raise HTTPException(404, "Not found")
@@ -44,6 +56,7 @@ def update_entity(ontology_id: str, entity_id: str, body: EntityUpdate, db: Sess
 
 @router.delete("/{entity_id}", status_code=204)
 def delete_entity(ontology_id: str, entity_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    _grant(db, current_user, ontology_id, "edit")
     e = db.query(Entity).filter(Entity.id == entity_id, Entity.ontology_id == ontology_id).first()
     if not e:
         raise HTTPException(404, "Not found")
@@ -56,9 +69,10 @@ def list_entity_instances(
     ontology_id: str,
     entity_id: str,
     db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """概念实体下挂的行级实例数据（Pipeline Mapping 与简易 LLM 提取共用同一张表）"""
+    _grant(db, current_user, ontology_id, "read")
     from app.models.entity_instance import EntityInstance
 
     entity = db.query(Entity).filter(

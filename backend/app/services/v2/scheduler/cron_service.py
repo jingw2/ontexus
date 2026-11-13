@@ -72,27 +72,10 @@ class CronService:
 
     def schedule_pipeline_run(self, pipeline_id: str, cron_expr: str, *, db: "Session | None" = None,
                                **schedule_kwargs) -> dict:
-        """为 Pipeline 注册定时运行任务。语义同 schedule_connection_sync。"""
-        cron_params = self.parse_cron(cron_expr)
-        if db is None:
-            logger.info(f"Pipeline {pipeline_id} cron 校验通过（未持久化）: {cron_expr}")
-            return {
-                "pipeline_id": pipeline_id,
-                "cron": cron_expr,
-                "celery_crontab": cron_params,
-                "status": "validated",
-            }
-
-        schedule = self._persist_schedule(db, target_type="pipeline", target_id=pipeline_id,
-                                          cron_expr=cron_expr, **schedule_kwargs)
-        logger.info(f"Pipeline {pipeline_id} 调度已持久化: {cron_expr}")
-        return {
-            "pipeline_id": pipeline_id,
-            "cron": cron_expr,
-            "celery_crontab": cron_params,
-            "status": "scheduled",
-            "next_due_at": schedule.next_due_at.isoformat() if schedule.next_due_at else None,
-        }
+        """Reject unsupported pipeline-target refresh schedules."""
+        raise ValueError(
+            "PIPELINE_SCHEDULE_UNSUPPORTED: pipeline-target schedules are not supported"
+        )
 
     @staticmethod
     def _persist_schedule(db: "Session", *, target_type: str, target_id: str, cron_expr: str,

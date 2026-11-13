@@ -17,8 +17,12 @@ function isStarted(receipt: ExecutionReceipt | ExecutionNotStarted | null): rece
  * hash itself; every write is the backend's own governed decision.
  */
 export default function ActionPlanPage() {
-  const { t } = useTranslation()
   const { planId } = useParams<{ planId: string }>()
+  return <ActionPlanContent key={planId} planId={planId} />
+}
+
+function ActionPlanContent({ planId }: { planId?: string }) {
+  const { t } = useTranslation()
   const [plan, setPlan] = useState<ActionPlan | null>(null)
   const [receipt, setReceipt] = useState<ApprovalReceipt | null>(null)
   const [execution, setExecution] = useState<ExecutionReceipt | ExecutionNotStarted | null>(null)
@@ -27,12 +31,13 @@ export default function ActionPlanPage() {
 
   const load = useCallback(() => {
     if (!planId) return
-    setError('')
-    runtimeApi.getActionPlan(planId).then(setPlan).catch(() => setError(t('runtime.plan.load_failed', 'Failed to load the action plan')))
+    runtimeApi.getActionPlan(planId)
+      .then(value => { setPlan(value); setError('') })
+      .catch(() => setError(t('runtime.plan.load_failed', 'Failed to load the action plan')))
     runtimeApi.getExecutionStatus(planId).then(setExecution).catch(() => {})
   }, [planId, t])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   const approve = async () => {
     if (!planId || !plan) return

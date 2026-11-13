@@ -1,7 +1,8 @@
 import '@/i18n'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import { runtimeApi } from '@/api/runtime'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -50,6 +51,25 @@ function renderPage() {
 }
 
 describe('ActionPlanPage', () => {
+  it('does not replace the current plan with a late prior-route response', async () => {
+    type Plan = Awaited<ReturnType<typeof runtimeApi.getActionPlan>>
+    let resolveOld!: (value: Plan) => void
+    const oldResponse = new Promise<Plan>(resolve => { resolveOld = resolve })
+    const get = vi.spyOn(runtimeApi, 'getActionPlan').mockImplementation(id =>
+      id === 'old' ? oldResponse : Promise.resolve({ ...PLAN, id, plan_hash: 'new-hash' } as Plan))
+    const status = vi.spyOn(runtimeApi, 'getExecutionStatus').mockResolvedValue({ status: 'not_started', plan_id: 'new', correlation_id: 'test' })
+    try {
+      render(<MemoryRouter initialEntries={['/plans/old']}>
+        <Link to="/plans/new">next plan</Link>
+        <Routes><Route path="/plans/:planId" element={<ActionPlanPage />} /></Routes>
+      </MemoryRouter>)
+      await userEvent.click(screen.getByText('next plan'))
+      expect(await screen.findByTestId('plan-hash')).toHaveTextContent('new-hash')
+      await act(async () => { resolveOld(PLAN as Plan); await oldResponse })
+      expect(screen.getByTestId('plan-hash')).toHaveTextContent('new-hash')
+    } finally { get.mockRestore(); status.mockRestore() }
+  })
+
   it('shows the exact plan hash, approves, then executes and shows the receipt', async () => {
     let approveBody: unknown = null
     let executeBody: unknown = null

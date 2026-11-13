@@ -15,10 +15,13 @@ import pytest
 
 from app.services.llm_service import (
     VAGUE_RELATION_TYPES,
+    _looks_like_enum_value,
+    _looks_like_rule_name,
     apply_entity_resolution,
     extract_ontology,
     normalize_extracted_ontology,
     resolve_entities,
+    summarize_entity,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -39,7 +42,10 @@ def test_extraction_discipline_red_contract():
 def test_normalization_dedups_and_drops_junk_over_test_data_document():
     """A noisy extraction over the real 信贷 strategy document is normalized:
     duplicate surface forms merge, junk entities vanish, dangling and vague
-    relations are dropped, hierarchy relations survive."""
+    relations are dropped, hierarchy relations survive. Enum-value labels
+    (tier/stage/round markers) and business-rule names are also entity
+    leakage — dropped, along with any relation left dangling by their
+    removal."""
     document = TEST_DATA / "信贷" / "信贷业务战略.md"
     if not document.exists():
         pytest.skip("test_data document unavailable")
@@ -54,6 +60,7 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
             {"name_cn": "A层", "type": "Category", "description": "优质客户", "properties": {}},
             {"name_cn": "B层", "type": "Category", "description": "良好客户", "properties": {}},
             {"name_cn": "授信额度", "type": "Concept", "description": "可贷上限", "properties": {}},
+            {"name_cn": "促销定价规则", "type": "Concept", "description": "误提取的规则", "properties": {}},
             {"name_cn": "12345", "type": "Concept", "description": "噪音", "properties": {}},
             {"name_cn": "", "type": "Concept", "description": "空名", "properties": {}},
             {"name_cn": "信贷业务战略.md", "type": "Concept", "description": "文件名", "properties": {}},
@@ -85,6 +92,11 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
     # junk entities dropped
     assert "12345" not in names
     assert "信贷业务战略.md" not in names
+    # enum-value labels (tier markers) are not concepts — dropped
+    assert "A层" not in names
+    assert "B层" not in names
+    # a business rule is not an entity — dropped (belongs in logic_rules)
+    assert "促销定价规则" not in names
     assert not any(not (e.get("name_cn") or "").strip() for e in normalized["entities"])
     # every surviving entity carries a grounded one-line description
     assert all(e.get("description") for e in normalized["entities"])
@@ -97,10 +109,31 @@ def test_normalization_dedups_and_drops_junk_over_test_data_document():
     assert ("借款人", "DEPENDS_ON", "信用评分") in triples
     # the duplicate DEPENDS_ON appeared twice -> deduplicated to one
     assert sum(1 for r in normalized["relations"] if r["type"] == "DEPENDS_ON") == 1
-    # hierarchy relations (IS-A / INSTANCE-OF) survive intact
-    assert ("A层", "INSTANCE-OF", "信用分层") in triples
-    assert ("B层", "INSTANCE-OF", "信用分层") in triples
-    assert ("A层", "GOVERNED_BY", "授信额度") in triples
+    # relations pointing at the dropped enum-value entities are now dangling
+    # references and are dropped too
+    assert ("A层", "INSTANCE-OF", "信用分层") not in triples
+    assert ("B层", "INSTANCE-OF", "信用分层") not in triples
+    assert ("A层", "GOVERNED_BY", "授信额度") not in triples
+
+
+def test_looks_like_enum_value_matches_tier_stage_and_round_labels():
+    for name in ("A层", "B层", "C级", "M0", "M1", "M2+", "M0阶段", "A轮融资", "D轮融资", "A档", "B类"):
+        assert _looks_like_enum_value(name), name
+
+
+def test_looks_like_enum_value_does_not_match_real_concepts():
+    for name in ("借款人", "供应商", "A股", "P7", "信用分层", "授信额度", "D轮"):
+        assert not _looks_like_enum_value(name), name
+
+
+def test_looks_like_rule_name_matches_policy_and_rule_suffixes():
+    for name in ("促销定价规则", "审批超时规则", "员工考勤制度", "风险准入政策"):
+        assert _looks_like_rule_name(name), name
+
+
+def test_looks_like_rule_name_does_not_match_concepts():
+    for name in ("借款人", "信用分层", "贷款产品"):
+        assert not _looks_like_rule_name(name), name
 
 
 def test_normalization_is_idempotent_and_keeps_clean_output():
@@ -208,6 +241,67 @@ def test_resolve_entities_single_type_member_skips_llm_call():
     assert alias_map == {"唯一实体": "唯一实体"}
 
 
+def test_resolve_entities_anchors_canonical_to_existing_entity():
+    """Incremental-update guidance: a new-run surface form that clusters with
+    an already-published entity must remap to that entity's own name, not to
+    whatever the model picked as canonical."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+
+    def fake_call(provider, api_key, api_base, model, messages):
+        assert "[已存在]" in messages[1]["content"]
+        return '{"clusters": [{"canonical": "客户方", "aliases": ["客户方", "客户"]}]}'
+
+    llm_service._call_llm = fake_call
+    try:
+        new_entities = [{"name_cn": "客户方", "type": "Concept", "description": "本轮新提取"}]
+        existing = [{"name_cn": "客户", "type": "Concept", "description": "已发布的规范实体"}]
+        alias_map = resolve_entities(
+            new_entities, {"provider": "openai", "api_key": "x"}, "m", existing_entities=existing,
+        )
+    finally:
+        llm_service._call_llm = original
+    # the model picked "客户方" as canonical, but the existing entity "客户"
+    # must win regardless
+    assert alias_map["客户方"] == "客户"
+
+
+def test_resolve_entities_single_new_entity_still_checked_against_existing():
+    """A single new entity (which would otherwise skip clustering entirely)
+    must still be checked against existing entities of the same type."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (
+        '{"clusters": [{"canonical": "借款人", "aliases": ["借款方", "借款人"]}]}'
+    )
+    try:
+        alias_map = resolve_entities(
+            [{"name_cn": "借款方", "type": "Concept", "description": "本轮新提取"}],
+            {"provider": "openai", "api_key": "x"}, "m",
+            existing_entities=[{"name_cn": "借款人", "type": "Concept", "description": "已发布"}],
+        )
+    finally:
+        llm_service._call_llm = original
+    assert alias_map["借款方"] == "借款人"
+
+
+def test_resolve_entities_does_not_touch_existing_entities_of_other_types():
+    """Existing entities of a different type never enter the same clustering
+    call — no cross-type contamination."""
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
+    try:
+        alias_map = resolve_entities(
+            [{"name_cn": "唯一实体", "type": "Concept", "description": "d"}],
+            {"provider": "openai", "api_key": "x"}, "m",
+            existing_entities=[{"name_cn": "供应商甲", "type": "Supplier", "description": "d"}],
+        )
+    finally:
+        llm_service._call_llm = original
+    assert alias_map == {"唯一实体": "唯一实体"}
+
+
 def test_apply_entity_resolution_merges_and_remaps_references():
     """apply_entity_resolution merges aliased entities (keeping the richer
     description), remaps relation endpoints, drops self-loops created by the
@@ -255,3 +349,46 @@ def test_apply_entity_resolution_is_noop_for_identity_map():
     result = {"entities": [{"name_cn": "A"}], "relations": []}
     assert apply_entity_resolution(result, {"A": "A"}) is result
     assert apply_entity_resolution(result, {}) is result
+
+
+def test_summarize_entity_parses_profile_from_llm_response():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (
+        '{"summary": "借款人是信贷业务的核心概念。", '
+        '"key_facts": ["借款人需通过授信审批", "借款人拥有贷款账户", "多出来的第四条", '
+        '"第五条", "第六条会被截断"], '
+        '"time_range": {"start": "2026", "end": "ongoing"}}'
+    )
+    try:
+        profile = summarize_entity(
+            "借款人", "贷款申请人", "(借款人) --[APPLIES_FOR]--> (贷款)",
+            {"provider": "openai", "api_key": "x"}, "m",
+        )
+    finally:
+        llm_service._call_llm = original
+    assert profile["summary"] == "借款人是信贷业务的核心概念。"
+    assert len(profile["key_facts"]) == 5  # capped at 5
+    assert profile["time_range"] == {"start": "2026", "end": "ongoing"}
+
+
+def test_summarize_entity_returns_none_on_failure():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        profile = summarize_entity("借款人", "d", "", {"provider": "openai", "api_key": "x"}, "m")
+    finally:
+        llm_service._call_llm = original
+    assert profile is None
+
+
+def test_summarize_entity_defaults_missing_time_range_to_unknown():
+    from app.services import llm_service
+    original = llm_service._call_llm
+    llm_service._call_llm = lambda *a, **k: '{"summary": "s", "key_facts": []}'
+    try:
+        profile = summarize_entity("X", "d", "", {"provider": "openai", "api_key": "x"}, "m")
+    finally:
+        llm_service._call_llm = original
+    assert profile["time_range"] == {"start": "unknown", "end": "unknown"}

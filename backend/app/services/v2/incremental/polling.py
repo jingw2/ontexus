@@ -43,6 +43,7 @@ from app.schemas.refresh import (
 )
 from app.services.connection.base import DeltaPage, records_to_delta_page
 from app.services.connection.registry import get_connector
+from app.services.connection.config import build_connector_config, decrypt_connection_config
 from app.services.v2.incremental.contract import (
     _cursor_to_json,
     _lock_or_create_source_state,
@@ -128,22 +129,16 @@ def _connector_for_source(
 
 
 def _source_configuration(state: RefreshSourceState | None, connection: Connection | None) -> dict:
-    raw = dict(connection.config or {}) if connection is not None else {}
-    encrypted = raw.get("_encrypted")
-    if encrypted:
-        try:
-            from app.services import encryption_service
-
-            decrypted = encryption_service.decrypt(encrypted)
-            raw = json.loads(decrypted)
-        except Exception:
-            logger.warning("unable to decrypt refresh source configuration", exc_info=True)
+    raw = decrypt_connection_config(connection.config if connection is not None else {})
     config = dict(raw)
     if state is not None and state.configuration:
         # Refresh revisions carry source-owned cursor/policy settings while
         # credentials and connection details remain on Connection.
         config.update(state.configuration)
-    return config
+    resource = state.resource if state is not None else config.get("resource")
+    if connection is None:
+        return config
+    return build_connector_config(connection.kind, config, resource=resource)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

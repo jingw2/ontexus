@@ -79,13 +79,33 @@ def delete_curated(dataset_id: str, db: Session = Depends(get_db), _admin=Depend
         raise HTTPException(404, "Curated dataset not found")
     # 清理关联版本和媒体项
     ver_ids = [v.id for v in db.query(DatasetVersion).filter(DatasetVersion.dataset_id == dataset_id).all()]
+    media_uris: list[str] = []
     if ver_ids:
+        media_items = db.query(MediaItem).filter(MediaItem.dataset_version_id.in_(ver_ids)).all()
+        for m in media_items:
+            media_uris.append(m.storage_uri)
+            if m.ocr_result_uri:
+                media_uris.append(m.ocr_result_uri)
         db.query(MediaItem).filter(MediaItem.dataset_version_id.in_(ver_ids)).delete(synchronize_session=False)
     db.query(DatasetVersion).filter(DatasetVersion.dataset_id == dataset_id).delete(synchronize_session=False)
     # 清理审核记录
     db.query(CuratedReview).filter(CuratedReview.curated_dataset_id == dataset_id).delete(synchronize_session=False)
+    # 若曾发起过审核，_ensure_curated_dataset_row/旧版 /review 端点会用相同 id
+    # 懒创建一条 v2_curated_datasets 镜像行作为 CuratedReview 的 FK 桥接——上面
+    # 只删了 v2_datasets 里的真本体行，这条镜像行没有别的清理入口，不删就永久残留
+    db.query(CuratedDataset).filter(CuratedDataset.id == dataset_id).delete(synchronize_session=False)
     db.delete(ds)
     db.commit()
+
+    # Best-effort MinIO cleanup — never fails an already-committed delete
+    if media_uris:
+        from app.services.storage_service import get_storage_service
+        storage = get_storage_service()
+        for uri in media_uris:
+            try:
+                storage.delete_object(uri)
+            except Exception:
+                logger.warning("MinIO cleanup failed for object %s (dataset %s)", uri, dataset_id, exc_info=True)
 
 
 @router.get("/{dataset_id}", response_model=CuratedDatasetResponse)

@@ -20,6 +20,7 @@ run_id to Celery for a worker to pick up later. The run only starts
 from __future__ import annotations
 
 import uuid
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Mapping, Sequence
@@ -38,6 +39,7 @@ from app.tasks.topology import (
 )
 
 _cron_service = CronService()
+logger = logging.getLogger(__name__)
 
 # ScheduleRequest.target_type is the API-facing vocabulary ("connection" /
 # "pipeline"); RefreshSchedule.target_type persists the same vocabulary the
@@ -47,10 +49,11 @@ _cron_service = CronService()
 _STORED_TARGET_TYPE = {"connection": "source", "pipeline": "pipeline"}
 _TASK_NAME_BY_STORED_TARGET_TYPE = {"source": "refresh.connection", "pipeline": "refresh.pipeline"}
 
-# A connection/pipeline's schedule does not yet select a specific resource
-# (multi-resource fan-out is a later task's concern); scheduled runs are
-# scoped to this fixed placeholder resource until then.
+# Retained as an import-compatible fixture value for older callers.  New
+# schedule dispatch must resolve a concrete resource before creating a run.
 DEFAULT_RESOURCE = "__scheduled__"
+
+PIPELINE_SCHEDULE_UNSUPPORTED = "PIPELINE_SCHEDULE_UNSUPPORTED"
 
 _MAX_RETRY_ATTEMPTS = 20
 _DEFAULT_MAX_ATTEMPTS = 3
@@ -131,6 +134,10 @@ def _validate_retry_policy(retry_policy: Mapping[str, object] | None) -> None:
 def _validate_request(request: ScheduleRequest) -> ZoneInfo:
     if request.target_type not in _STORED_TARGET_TYPE:
         raise ValueError(f"unsupported target_type: {request.target_type!r}")
+    if request.target_type == "pipeline":
+        raise ValueError(
+            f"{PIPELINE_SCHEDULE_UNSUPPORTED}: pipeline-target schedules are not supported"
+        )
     if not request.target_id:
         raise ValueError("target_id is required")
     if not _cron_service.validate_cron(request.cron_expr):
@@ -315,9 +322,34 @@ def _dispatch_one_schedule(
         db.commit()
         return None
 
+    if schedule.target_type == "pipeline":
+        # Rows written before pipeline-target scheduling was closed remain
+        # readable, but must never be turned into a polling run whose
+        # ``source_id`` is actually a pipeline id.
+        schedule.enabled = False
+        schedule.next_due_at = None
+        logger.warning(
+            "Skipping unsupported pipeline refresh schedule %s (%s): %s",
+            schedule.id, schedule.target_id, PIPELINE_SCHEDULE_UNSUPPORTED,
+        )
+        db.commit()
+        return None
+
     source_id = schedule.target_id
-    resource = DEFAULT_RESOURCE
-    task_name = _TASK_NAME_BY_STORED_TARGET_TYPE[schedule.target_type]
+    from app.services.v2.incremental.operations import resolve_refresh_resource
+    from app.schemas.refresh import RefreshError
+
+    try:
+        resource = resolve_refresh_resource(db, source_id=source_id)
+    except RefreshError as exc:
+        logger.warning(
+            "Skipping refresh schedule %s for source %s: %s",
+            schedule.id, source_id, exc.reason_code,
+        )
+        schedule.next_due_at = _next_fire_utc(schedule.cron_expression, tz, max(due_at, now))
+        db.commit()
+        return None
+    task_name = _TASK_NAME_BY_STORED_TARGET_TYPE["source"]
     idempotency_key = f"schedule:{schedule.id}:{due_at.isoformat()}"
     run = _lock_schedule_occurrence(
         db, source_id=source_id, resource=resource, idempotency_key=idempotency_key,

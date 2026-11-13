@@ -178,6 +178,57 @@ def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.parametrize("reference", [None, "agent", "prompt"])
+def test_delete_model_preserves_migrated_reference_guards(pg, reference):
+    from fastapi import HTTPException
+    from app.models.agent import Agent, AgentVersion
+    from app.models.agent_config import PromptGeneration
+    from app.models.model_version import ModelMigrationFinding
+    from app.routers.models import delete_model
+
+    model_id = _seed_llm_config(pg)
+    _migrate_rows(pg)
+    version_id = pg.execute(text(
+        "SELECT active_version_id FROM model_configs WHERE id = :id"
+    ), {"id": model_id}).scalar_one()
+    assert version_id is not None
+    pg.add(ModelMigrationFinding(model_config_id=model_id, code="TEST", reason="test finding"))
+    if reference:
+        pg.add(Agent(id="delete-test-agent", owner_id="seed-user"))
+        pg.flush()
+        if reference == "agent":
+            schema_id = pg.execute(text(
+                "SELECT active_version_id FROM application_state_schema_registries WHERE application_key = 'chat-v1'"
+            )).scalar_one()
+            pg.add(AgentVersion(
+                agent_id="delete-test-agent", version_no=1, name="dependent",
+                default_model_config_version_id=version_id, default_model_name="gpt-4o",
+                application_state_schema_version_id=schema_id, config_hash="a" * 64,
+                created_by="seed-user",
+            ))
+        else:
+            pg.add(PromptGeneration(
+                agent_id="delete-test-agent", base_version_no=1,
+                model_config_version_id=version_id, model_name="gpt-4o",
+                input_hash="b" * 64, output_hash="c" * 64, requester_id="seed-user",
+            ))
+    pg.commit()
+
+    for table in ("model_config_versions", "model_credentials", "model_migration_findings"):
+        assert pg.execute(text(f"SELECT count(*) FROM {table} WHERE model_config_id = :id"), {"id": model_id}).scalar_one() > 0
+    if reference:
+        with pytest.raises(HTTPException) as denied:
+            delete_model(model_id, db=pg)
+        assert denied.value.status_code == 409
+        assert denied.value.detail == "MODEL_REFERENCED"
+        assert pg.execute(text("SELECT active_version_id FROM model_configs WHERE id = :id"), {"id": model_id}).scalar_one() == version_id
+    else:
+        delete_model(model_id, db=pg)
+        assert pg.execute(text("SELECT count(*) FROM model_configs WHERE id = :id"), {"id": model_id}).scalar_one() == 0
+        for table in ("model_config_versions", "model_credentials", "model_migration_findings"):
+            assert pg.execute(text(f"SELECT count(*) FROM {table} WHERE model_config_id = :id"), {"id": model_id}).scalar_one() == 0
+
+
 def test_port_resolves_immutable_llm_version_and_rejects_blocked(pg):
     from app.services.publication.extraction_model_port import SqlExtractionModelPort
 
@@ -277,8 +328,10 @@ def test_model_api_redacted_tagged_union_and_versioned_surface(pg):
     assert detail["active_version"]["version_no"] == 2
     assert detail["active_version"]["behavior_hash"] != versions[0]["behavior_hash"]
 
-    # delete is RESTRICT while versions exist
-    assert client.delete(f"/api/v1/models/{llm_id}", headers=headers).status_code == 409
+    # Owned versions alone do not make an unused model undeletable. Real
+    # Agent/prompt references are covered separately by the deletion matrix.
+    assert client.delete(f"/api/v1/models/{llm_id}", headers=headers).status_code == 204
+    assert client.get(f"/api/v1/models/{llm_id}", headers=headers).status_code == 404
 
     # viewer cannot create/update models (editor ceiling)
     assert client.post("/api/v1/models", json={"name": "x", "provider": "openai", "models": ["gpt-4o"]}, headers=viewer_headers).status_code == 403

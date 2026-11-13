@@ -7,7 +7,7 @@ import { ontologyApi } from '@/api/ontologies'
 import { apiClient } from '@/api/client'
 import ConfidenceBar from '@/components/ConfidenceBar'
 import ConfirmDialog from '@/components/ConfirmDialog'
-import { Pencil, Trash2, Plus, Search, ToggleLeft, ToggleRight, CheckCircle, Loader2 } from 'lucide-react'
+import { Pencil, Trash2, Plus, Search, ToggleLeft, ToggleRight } from 'lucide-react'
 import type { LogicRule } from '@/types/ontology'
 
 type LogicRuleRow = LogicRule & { name?: string }
@@ -56,11 +56,6 @@ export default function LogicTab({ ontologyId }: { ontologyId: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['logic', ontologyId] }),
   })
 
-  const publishMut = useMutation({
-    mutationFn: () => apiClient.post(`/ontologies/${ontologyId}/logic/publish`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['logic', ontologyId] }),
-  })
-
   const filtered = useMemo(() => {
     const q = searchQ.trim().toLowerCase()
     if (!q) return rules as LogicRule[]
@@ -80,11 +75,6 @@ export default function LogicTab({ ontologyId }: { ontologyId: string }) {
             placeholder={t('logic.ph_search')}
             className="w-full border rounded-lg pl-8 pr-3 py-2 text-sm" />
         </div>
-        <button onClick={() => publishMut.mutate()} disabled={publishMut.isPending}
-          className="flex items-center gap-1.5 px-3 py-2 bg-green-700 text-white rounded-lg text-sm disabled:opacity-50">
-          {publishMut.isPending ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
-          {t('logic.publish_all')}
-        </button>
         <button onClick={() => { setShowCreate(true); reset() }}
           className="flex items-center gap-2 px-3 py-2 bg-black text-white rounded-lg text-sm">
           <Plus size={14} /> {t('logic.add')}

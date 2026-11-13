@@ -90,7 +90,7 @@ In Ontexus, every ontology is made of these building blocks:
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Cytoscape.js |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, Cytoscape.js |
 | Backend | FastAPI, SQLAlchemy, Alembic |
 | Metadata DB | SQLite (dev) / PostgreSQL (prod) |
 | Object storage | MinIO (optional, local-file fallback) |

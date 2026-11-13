@@ -5,13 +5,22 @@ from app.models.entity import Entity
 from app.models.relation import Relation
 from app.models.ontology import OntologyProject
 from app.models.user import User
+from app.services.ontology_access import GrantDenied, require_project_grant
 from app.services.publication.working_copy import OntologyWorkingCopyService
 from app.services.relation_dedup import dedupe_relation_rows
 
 router = APIRouter()
 
+
+def _grant(db: Session, actor: User, ontology_id: str, capability: str) -> dict:
+    try:
+        return require_project_grant(db, actor, ontology_id, capability)
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
 @router.get("")
-def get_graph(ontology_id: str, limit: int = 300, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_graph(ontology_id: str, limit: int = 300, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _grant(db, current_user, ontology_id, "read")
     project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not project:
         raise HTTPException(404, "Ontology not found")
@@ -138,12 +147,26 @@ def create_relation(
 ):
     from app.models.relation import Relation
     import uuid
+    _grant(db, current_user, ontology_id, "edit")
+    source_entity = body.get("source_entity")
+    target_entity = body.get("target_entity")
+    if not source_entity or not target_entity:
+        raise HTTPException(status_code=422, detail="source_entity and target_entity are required")
+    source = db.query(Entity).filter(
+        Entity.id == source_entity, Entity.ontology_id == ontology_id
+    ).first()
+    target = db.query(Entity).filter(
+        Entity.id == target_entity, Entity.ontology_id == ontology_id
+    ).first()
+    if source is None or target is None:
+        raise HTTPException(status_code=422, detail="RELATION_ENTITIES_MUST_BELONG_TO_ONTOLOGY")
+
     def _write():
         relation = Relation(
             id=str(uuid.uuid4()),
             ontology_id=ontology_id,
-            source_entity=body["source_entity"],
-            target_entity=body["target_entity"],
+            source_entity=source_entity,
+            target_entity=target_entity,
             type=body.get("type", "关联"),
             properties=body.get("properties", {}),
             confidence=body.get("confidence", 1.0),
@@ -154,6 +177,7 @@ def create_relation(
 
 @router.delete("/relations/{relation_id}", status_code=204)
 def delete_relation(ontology_id: str, relation_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    _grant(db, current_user, ontology_id, "edit")
     r = db.query(Relation).filter(Relation.id == relation_id, Relation.ontology_id == ontology_id).first()
     if not r:
         raise HTTPException(404, "Not found")

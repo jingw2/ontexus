@@ -27,12 +27,6 @@ from app.tasks.topology import (
 
 logger = logging.getLogger(__name__)
 
-# Placeholder resource scope for a connection/pipeline-level manual or
-# scheduled refresh until multi-resource fan-out lands (matches
-# schedule_service.DEFAULT_RESOURCE).
-DEFAULT_RESOURCE = "__scheduled__"
-
-
 def _celery_send_task(task_name: str, args, queue: str) -> str:
     """Adapter matching `enqueue_refresh_run`'s `send_task` contract —
     Celery's own `send_task(name, args, kwargs, ...)` would otherwise bind a
@@ -325,27 +319,28 @@ def create_manual_connection_run(db, connection_id: str):
     """
     from app.models.v2.connection import Connection
     from app.schemas.refresh import RefreshError, RefreshPolicy
-    from app.services.v2.incremental.operations import _policy_for_source, _source_state
+    from app.services.v2.incremental.operations import (
+        _policy_for_source,
+        _source_state,
+        resolve_refresh_resource,
+    )
     from app.services.v2.incremental.contract import claim_refresh_run
 
     connection = db.get(Connection, connection_id)
     if connection is None:
-        # Preserve the historical internal helper behavior for callers that
-        # already provision source state without a Connection row. The
-        # authenticated route verifies the connection first; persisted
-        # policies are enforced whenever that source record exists.
-        policy = RefreshPolicy.BATCH
-    else:
-        configured_state = _source_state(db, source_id=connection_id)
-        policy = _policy_for_source(connection, configured_state)
-        if policy is RefreshPolicy.EVENT_DRIVEN:
-            raise RefreshError(
-                "EVENT_TRIGGER_REQUIRES_SIGNATURE",
-                "event-driven refreshes require the signed webhook route",
-            )
+        raise RefreshError("SOURCE_NOT_FOUND", f"no source connection {connection_id}")
+
+    resource = resolve_refresh_resource(db, source_id=connection_id)
+    configured_state = _source_state(db, source_id=connection_id, resource=resource)
+    policy = _policy_for_source(connection, configured_state)
+    if policy is RefreshPolicy.EVENT_DRIVEN:
+        raise RefreshError(
+            "EVENT_TRIGGER_REQUIRES_SIGNATURE",
+            "event-driven refreshes require the signed webhook route",
+        )
 
     run = claim_refresh_run(
-        db, source_id=connection_id, resource=DEFAULT_RESOURCE, policy=policy,
+        db, source_id=connection_id, resource=resource, policy=policy,
         idempotency_key=f"manual:{uuid.uuid4()}", lease_owner="manual-sync",
         now=datetime.now(timezone.utc),
     )

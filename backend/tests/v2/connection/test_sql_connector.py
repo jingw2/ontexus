@@ -37,6 +37,49 @@ def test_registry_mysql_returns_sql_connector():
     assert CONNECTOR_REGISTRY["postgres"] is SQLConnector
 
 
+def test_saved_sql_connection_fields_are_compiled_to_a_safe_sqlalchemy_url():
+    from app.services.connection.config import build_connector_config
+
+    mysql = build_connector_config(
+        "mysql",
+        {
+            "host": "127.0.0.1",
+            "port": "3306",
+            "database": "runtime",
+            "user": "runtime",
+            "password": "p@ss:word/with#chars",
+        },
+    )
+    postgres = build_connector_config(
+        "postgres",
+        {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "runtime",
+            "user": "runtime",
+            "password": "secret",
+        },
+    )
+
+    assert mysql["connection_string"] == (
+        "mysql+pymysql://runtime:p%40ss%3Aword%2Fwith%23chars@127.0.0.1:3306/runtime"
+    )
+    assert postgres["connection_string"] == "postgresql+psycopg2://runtime:secret@127.0.0.1:5432/runtime"
+
+
+def test_sql_connector_keeps_actionable_failure_detail_without_exposing_password():
+    from app.services.connection.sql_connector import SQLConnector
+
+    connector = SQLConnector({
+        "connection_string": "postgresql+psycopg2://user:secret@localhost:5432/runtime",
+    })
+    connector._get_engine = MagicMock(side_effect=RuntimeError("connection refused"))
+
+    assert connector.test_connection() is False
+    assert connector.last_error == "connection refused"
+    assert "secret" not in connector.last_error
+
+
 def test_get_connector_all_supported_kinds():
     from app.services.connection.registry import get_connector
     for kind in ["file", "mysql", "postgres"]:

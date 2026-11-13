@@ -91,6 +91,7 @@ export default function ModelsPage() {
   const qc = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ModelConfig | null>(null)
+  const [deleteError, setDeleteError] = useState('')
   const [testResult, setTestResult] = useState<Record<string, { msg: string; ok: boolean }>>({})
   const [formTags, setFormTags] = useState<string[]>([])
   const { register, handleSubmit, reset, setValue: setCreateValue, control } = useForm<ModelFormValues>({
@@ -114,7 +115,11 @@ export default function ModelsPage() {
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => modelApi.delete(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['models'] }); setDeleteTarget(null) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['models'] }); setDeleteTarget(null); setDeleteError('') },
+    onError: (err: unknown) => {
+      const detail = (err as { detail?: string })?.detail
+      setDeleteError(detail === 'MODEL_REFERENCED' ? t('model.delete_failed_referenced') : t('model.delete_failed_generic'))
+    },
   })
 
   const testMut = useMutation({
@@ -197,7 +202,7 @@ export default function ModelsPage() {
                 <div className="flex gap-2 shrink-0">
                   <button onClick={() => testMut.mutate(m.id)} disabled={testMut.isPending} className="inline-flex items-center gap-1 px-2.5 py-1.5 border rounded text-xs hover:bg-gray-50 disabled:opacity-50"><TestTube2 size={13} />{t('model.test_short')}</button>
                   <button onClick={() => openEdit(m)} className="inline-flex items-center gap-1 px-2.5 py-1.5 border rounded text-xs hover:bg-gray-50 text-blue-600"><Pencil size={13} />{t('common.edit')}</button>
-                  <button onClick={() => setDeleteTarget(m)} className="inline-flex items-center gap-1 px-2.5 py-1.5 border rounded text-xs hover:bg-gray-50 text-red-500"><Trash2 size={13} />{t('common.delete')}</button>
+                  <button onClick={() => { setDeleteError(''); setDeleteTarget(m) }} className="inline-flex items-center gap-1 px-2.5 py-1.5 border rounded text-xs hover:bg-gray-50 text-red-500"><Trash2 size={13} />{t('common.delete')}</button>
                 </div>
               </div>
             </div>
@@ -274,7 +279,9 @@ export default function ModelsPage() {
       )}
 
       <ConfirmDialog open={!!deleteTarget} title={t('model.confirm_delete')} message={t('model.confirm_delete_msg', { name: deleteTarget?.name })}
-        onConfirm={() => deleteTarget && deleteMut.mutate(deleteTarget.id)} onCancel={() => setDeleteTarget(null)} />
+        error={deleteError}
+        onConfirm={() => deleteTarget && deleteMut.mutate(deleteTarget.id)}
+        onCancel={() => { setDeleteTarget(null); setDeleteError('') }} />
     </div>
   )
 }

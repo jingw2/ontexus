@@ -16,8 +16,12 @@ import type { ActionPlan, ReconciliationCase } from '@/types/runtime'
  * that invariant, not a field the server returns.
  */
 export default function ReconciliationPage() {
-  const { t } = useTranslation()
   const { reconciliationId } = useParams<{ reconciliationId: string }>()
+  return <ReconciliationContent key={reconciliationId} reconciliationId={reconciliationId} />
+}
+
+function ReconciliationContent({ reconciliationId }: { reconciliationId?: string }) {
+  const { t } = useTranslation()
   const [reconciliation, setReconciliation] = useState<ReconciliationCase | null>(null)
   const [rollbackPlan, setRollbackPlan] = useState<ActionPlan | null>(null)
   const [error, setError] = useState('')
@@ -25,13 +29,12 @@ export default function ReconciliationPage() {
 
   const load = useCallback(() => {
     if (!reconciliationId) return
-    setError('')
     runtimeApi.getReconciliation(reconciliationId)
-      .then(setReconciliation)
+      .then(value => { setReconciliation(value); setError('') })
       .catch(() => setError(t('runtime.reconciliation.load_failed', 'Failed to load the reconciliation case')))
   }, [reconciliationId, t])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   const createRollback = async () => {
     if (!reconciliation) return

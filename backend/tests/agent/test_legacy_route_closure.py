@@ -151,6 +151,8 @@ def closure_db():
 
 def _seed(closure_db):
     from app.services.auth_service import hash_password
+    from app.models.user import User
+    from app.services.ontology_access import creator_grant
 
     Session, _ = closure_db
     username = "closure-" + uuid.uuid4().hex[:8]
@@ -167,6 +169,7 @@ def _seed(closure_db):
         ), {"id": str(uuid.uuid4()), "name": "Closure " + uuid.uuid4().hex[:8], "creator": actor_id, "domain": DEFAULT_DOMAIN})
         ontology_id = session.execute(text("SELECT id FROM ontology_projects WHERE created_by=:c ORDER BY created_at DESC LIMIT 1"), {"c": actor_id}).scalar_one()
         session.commit()
+        creator_grant(session, ontology_id, session.get(User, actor_id))
         return actor_id, ontology_id
 
 

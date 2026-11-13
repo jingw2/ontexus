@@ -1,6 +1,7 @@
 from app.tasks.celery_app import celery_app
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -8,6 +9,7 @@ logger = logging.getLogger(__name__)
 from app.models import (  # noqa: E402, F401
     user, ontology, file, prompt, model_config,
     entity, logic as logic_model, action, relation, extraction_task, rules_config,
+    entity_instance, entity_instance_relation,
 )
 
 # ── 概念/实例分离指令 — 追加到所有提取 Prompt 之后 ───────────────────────────
@@ -20,7 +22,20 @@ entities 数组只填"概念/类型"实体（如"供应商""借款人""贷款产
 不要为文档中提到的每个具体命名对象（如具体公司名、具体人名、具体订单号、具体条款标题）单独创建 entity。
 文档中提到的具体命名实例，放入新增的 instances 数组，通过 entity_type 字段关联到其所属概念的 name_cn：
 "instances": [{"entity_type": "所属概念的name_cn", "name_cn": "实例名称", "name_en": "可选", "properties": {"属性1": "值"}, "confidence": 0.9}]
-relations 只在概念之间建立（如 供应商 -[supply]-> 产品），不要在具体实例之间建立关系。"""
+relations 只在概念之间建立（如 供应商 -[supply]-> 产品），不要在具体实例之间建立关系。
+
+如果两个具体命名实例之间存在文档明确写出的因果/治疗/相互作用等关系（如"2型糖尿病 导致 糖尿病肾病""阿司匹林 与 华法林 相互作用"），
+放入新增的 instance_relations 数组，不要因为"relations 只在概念之间建立"而丢弃这类信息：
+"instance_relations": [{"source": "实例名称", "target": "实例名称", "type": "causes|interacts_with|治疗|等英文或语义明确的关系类型", "confidence": 0.9}]
+source/target 必须是 instances 数组里已出现的 name_cn，不要引用未提取的实例或概念实体本身。
+
+属性的枚举值/分级/分档/阶段标签（如信用分层的"A层""B层""C层"、逾期阶段的"M0""M1""M2+"、
+融资轮次的"A轮融资""D轮融资"）不是独立的概念，也不是需要单独建 instance 的命名对象——它们是所属
+概念（如"信用分层""逾期阶段""融资"）某个属性的可选取值。不要为它们创建 entity，也不要创建
+instance；只需在所属概念的 properties 里以枚举值形式体现（如信用分层.properties.levels = ["A层","B层","C层"]）。
+
+业务规则、政策、判断条件、定价/审批/校验类规则（如"促销定价规则""审批超时规则""授信额度校验"）
+不是实体，禁止作为 entity 或 instance 输出，必须放入 logic_rules 数组。"""
 
 
 # ── Extraction results merge (方案A) ───────────────────────────────────────
@@ -31,6 +46,7 @@ def _merge_extraction_results(results: list[dict]) -> dict:
     all_logic: list[dict] = []
     all_actions: list[dict] = []
     all_instances: list[dict] = []
+    all_instance_relations: list[dict] = []
 
     # 收集全部
     for r in results:
@@ -53,6 +69,9 @@ def _merge_extraction_results(results: list[dict]) -> dict:
         for inst in (r.get("instances") or []):
             if isinstance(inst, dict):
                 all_instances.append(inst)
+        for ir in (r.get("instance_relations") or []):
+            if isinstance(ir, dict):
+                all_instance_relations.append(ir)
 
     # 实体去重（按 name_cn，保留属性最丰富的）
     seen_entities: dict[str, dict] = {}
@@ -116,12 +135,22 @@ def _merge_extraction_results(results: list[dict]) -> dict:
             seen_instances.add(key)
             instances.append(inst)
 
+    # 实例关系去重（source-target-type 唯一）
+    seen_inst_rels: set = set()
+    instance_relations = []
+    for ir in all_instance_relations:
+        key = (ir.get("source", ""), ir.get("target", ""), ir.get("type", ""))
+        if key not in seen_inst_rels and key[0] and key[1]:
+            seen_inst_rels.add(key)
+            instance_relations.append(ir)
+
     return {
         "entities": entities,
         "relations": relations,
         "logic_rules": list(seen_logic.values()),
         "actions": list(seen_actions.values()),
         "instances": instances,
+        "instance_relations": instance_relations,
     }
 
 
@@ -241,6 +270,75 @@ def _fuzzy_resolve_entity(name: str, name_to_id: dict) -> str | None:
     return candidates[0][1]
 
 
+# ── Tiered model selection (graph-engineering playbook, model selection) ────
+# Extraction is high-volume and schema-constrained — speed/cost dominate, so
+# it always uses whatever model the user picked. Resolution and relation
+# inference weigh conflicting evidence — reasoning quality dominates — so
+# when the user picked an explicitly fast/cheap variant, we look for a
+# stronger sibling already configured on the same model config and use that
+# instead. No new user-facing setting: this reads only what's already in
+# ModelConfig.models.
+_FAST_MODEL_HINTS = ("flash", "mini", "haiku", "lite", "turbo", "nano", "fast")
+
+
+def _select_reasoning_model(model_name: str, available_models: list) -> str:
+    """Pick the model to use for judgment-heavy stages (resolution, relation
+    inference). Falls back to `model_name` unchanged unless the user's pick
+    looks like a fast/cheap variant AND a non-fast sibling exists in the same
+    model config — so behavior is identical to today whenever no better
+    candidate is configured."""
+    if not any(hint in model_name.lower() for hint in _FAST_MODEL_HINTS):
+        return model_name
+    for candidate in available_models or []:
+        if isinstance(candidate, str) and candidate != model_name and not any(
+            hint in candidate.lower() for hint in _FAST_MODEL_HINTS
+        ):
+            return candidate
+    return model_name
+
+
+# ── Long-document chunking (graph-engineering playbook, scaling guidance) ───
+_CHUNK_MAX_CHARS = 12000
+_CHUNK_OVERLAP_CHARS = 500
+_SECTION_HEADER = re.compile(r"^#{1,3}\s+.*$", re.MULTILINE)
+
+
+def _split_sections(md: str) -> list[str]:
+    """Split markdown into section chunks at heading boundaries. Falls back to
+    paragraph boundaries when the document has no headings at all."""
+    starts = [m.start() for m in _SECTION_HEADER.finditer(md)]
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    if len(starts) > 1:
+        return [md[s:e] for s, e in zip(starts, starts[1:] + [len(md)]) if md[s:e].strip()]
+    return [p for p in md.split("\n\n") if p.strip()]
+
+
+def _chunk_document(md: str, max_chars: int = _CHUNK_MAX_CHARS, overlap_chars: int = _CHUNK_OVERLAP_CHARS) -> list[str]:
+    """Chunk a long document at section boundaries so a single extraction call
+    never has to hold the whole thing — entities/relations still land within
+    the same chunk as their context. Each chunk after the first repeats the
+    tail of the previous chunk as overlap, so a concept mentioned at a section
+    boundary isn't split from the relations described just after it. Short
+    documents (the common case) pass through unchanged as a single chunk."""
+    if len(md) <= max_chars:
+        return [md]
+
+    sections = _split_sections(md)
+    chunks: list[str] = []
+    current = ""
+    for section in sections:
+        if current and len(current) + len(section) > max_chars:
+            chunks.append(current)
+            overlap = current[-overlap_chars:] if overlap_chars > 0 else ""
+            current = overlap + section
+        else:
+            current += section
+    if current.strip():
+        chunks.append(current)
+    return chunks or [md]
+
+
 @celery_app.task(bind=True)
 def run_extraction(self, task_id: str):
     import app.models  # noqa: F401 — register all tables for FK resolution
@@ -286,6 +384,12 @@ def run_extraction(self, task_id: str):
             task.status = "failed"; task.error = "Model or prompt not found"; db.commit(); return
 
         model_name = task.parameters.get("model_name", "")
+        # resolution/relation-inference weigh conflicting evidence — use a
+        # stronger sibling model already configured on this model config when
+        # the user picked a fast/cheap variant for extraction (see
+        # _select_reasoning_model); falls back to model_name unchanged
+        # otherwise, so this is a no-op unless a better candidate exists
+        reasoning_model_name = _select_reasoning_model(model_name, model_cfg.models)
         config_dict = {
             "provider": model_cfg.provider,
             "api_key":  decrypt(model_cfg.api_key_encrypted or ""),
@@ -309,14 +413,19 @@ def run_extraction(self, task_id: str):
         max_workers = 1  # serial extraction to avoid OOM with large LLM payloads
         completed = 0
 
-        task.progress = {"stage": f"extracting files 0/{len(valid_mds)} (parallel ×{max_workers})", "pct": 20}
+        # a long document is chunked at section boundaries first (see
+        # _chunk_document) — most documents are short and pass through as a
+        # single chunk, so this is a no-op for today's typical corpus
+        units = [(f, chunk) for f in valid_mds for chunk in _chunk_document(_clean(f.converted_md or ""))]
+        total_units = len(units)
+
+        task.progress = {"stage": f"extracting files 0/{total_units} (parallel ×{max_workers})", "pct": 20}
         db.commit()
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
-            for f in valid_mds:
-                md = _clean(f.converted_md or "")
-                futures[executor.submit(extract_ontology, md, prompt_content, config_dict, model_name)] = f
+            for f, chunk in units:
+                futures[executor.submit(extract_ontology, chunk, prompt_content, config_dict, model_name)] = f
 
             for future in as_completed(futures):
                 f = futures[future]
@@ -327,7 +436,7 @@ def run_extraction(self, task_id: str):
                 except Exception:
                     logger.exception("extract_ontology failed for file %s", getattr(f, "id", f))
                 completed += 1
-                task.progress = {"stage": f"extracting files {completed}/{len(valid_mds)} (parallel ×{max_workers})", "pct": 20 + 35 * completed // len(valid_mds)}
+                task.progress = {"stage": f"extracting files {completed}/{total_units} (parallel ×{max_workers})", "pct": 20 + 35 * completed // total_units}
                 db.commit()
 
         if all_results:
@@ -337,11 +446,23 @@ def run_extraction(self, task_id: str):
             # so a concept extracted under different surface forms — whether
             # across files or within one document — would otherwise fracture
             # into separate nodes
-            if len(result.get("entities") or []) > 1:
+            new_entity_count = len(result.get("entities") or [])
+            # incremental-update guidance: resolve this run's new entities
+            # against the ontology's already-published entities too, so a
+            # re-run doesn't create a duplicate for a surface-form variant of
+            # something that already exists
+            existing_entities_for_resolution = [
+                {"name_cn": e.name_cn, "description": e.description, "type": e.type}
+                for e in db.query(Entity).filter(Entity.ontology_id == task.ontology_id).all()
+            ]
+            if new_entity_count > 1 or (new_entity_count == 1 and existing_entities_for_resolution):
                 task.progress = {"stage": "resolving entities", "pct": 58}
                 db.commit()
                 from app.services.llm_service import resolve_entities, apply_entity_resolution
-                alias_map = resolve_entities(result["entities"], config_dict, model_name)
+                alias_map = resolve_entities(
+                    result["entities"], config_dict, reasoning_model_name,
+                    existing_entities=existing_entities_for_resolution,
+                )
                 result = apply_entity_resolution(result, alias_map)
         else:
             # 全部失败时回退到合并文本单次提取
@@ -390,7 +511,7 @@ def run_extraction(self, task_id: str):
             db.commit()
             extra_rels = infer_relations(
                 entities_extracted, relations_extracted,
-                combined_text, config_dict, model_name
+                combined_text, config_dict, reasoning_model_name
             )
             if extra_rels:
                 # Accept relations where both endpoints fuzzy-match a known entity name
@@ -439,7 +560,10 @@ def run_extraction(self, task_id: str):
                 ent = existing_ent_map[name_cn]
                 # Always allow LLM to enrich description, properties, name_en, name_abbr
                 if e_data.get("description"): ent.description = e_data["description"]
-                if props:                     ent.properties  = props
+                # merge, don't replace — a prior run's hub summary
+                # (summary/key_facts/summary_degree) must survive a re-run
+                # that doesn't touch this entity's properties otherwise
+                if props:                     ent.properties  = {**(ent.properties or {}), **props}
                 if e_data.get("name_en"):     ent.name_en     = e_data["name_en"]
                 if name_abbr:                 ent.name_abbr   = name_abbr
                 if e_data.get("type"):        ent.type        = e_data["type"]
@@ -472,6 +596,10 @@ def run_extraction(self, task_id: str):
         # ── 写入实例数据（EntityInstance 表）— 挂在概念实体下，对齐 Pipeline Mapping ──
         from app.models.entity_instance import EntityInstance
         import hashlib as _hl
+        # instance_relations (below) needs to resolve a source/target instance
+        # name back to its stable id and owning concept entity id
+        instance_name_to_id: dict = {}
+        instance_id_to_entity_id: dict = {}
         for inst_data in result.get("instances", []):
             if not isinstance(inst_data, dict):
                 continue
@@ -506,11 +634,14 @@ def run_extraction(self, task_id: str):
                 id=stable_id, entity_id=concept_id, ontology_id=task.ontology_id,
                 row_identity=inst_name, row_data=inst_props,
             ))
+            instance_name_to_id[inst_name] = stable_id
+            instance_id_to_entity_id[stable_id] = concept_id
         db.commit()
 
         # ── Fix 2+4: upsert relations (by source_id, target_id, type) ────────
         existing_rels    = db.query(Relation).filter(Relation.ontology_id == task.ontology_id).all()
         existing_rel_set = {(r.source_entity, r.target_entity, r.type) for r in existing_rels}
+        relation_id_by_key: dict = {(r.source_entity, r.target_entity, r.type): r.id for r in existing_rels}
 
         for rel in result.get("relations", []):
             src_name = rel.get("source") or rel.get("source_entity", "")
@@ -522,12 +653,70 @@ def run_extraction(self, task_id: str):
             if rel_type in ("关联", "未知", "相关", "其他", "") or not rel_type.isascii():
                 continue
             if src_id and tgt_id and (src_id, tgt_id, rel_type) not in existing_rel_set:
+                new_rel_id = str(uuid.uuid4())
                 db.add(Relation(
-                    id=str(uuid.uuid4()), ontology_id=task.ontology_id,
+                    id=new_rel_id, ontology_id=task.ontology_id,
                     source_entity=src_id, target_entity=tgt_id,
                     type=rel_type, confidence=rel.get("confidence", 0.85),
                 ))
                 existing_rel_set.add((src_id, tgt_id, rel_type))
+                relation_id_by_key[(src_id, tgt_id, rel_type)] = new_rel_id
+
+        # instance_relations below may reuse any of the relations just added
+        # via relation_id_by_key as their relation_definition_id FK — flush
+        # now so those rows exist before EntityInstanceRelation references them
+        db.flush()
+
+        # ── instance-level relations (graph-engineering playbook): specific
+        # named things (e.g. 2型糖尿病, 阿司匹林) keep their own relation graph
+        # via EntityInstanceRelation, anchored to the concept-level Relation
+        # it instantiates (auto-created here if the LLM didn't also emit it) ──
+        from app.models.entity_instance_relation import EntityInstanceRelation
+        existing_inst_rels = db.query(EntityInstanceRelation).filter(
+            EntityInstanceRelation.ontology_id == task.ontology_id).all()
+        existing_inst_rel_set = {
+            (r.source_instance_id, r.target_instance_id, r.relation_definition_id)
+            for r in existing_inst_rels
+        }
+
+        for ir in result.get("instance_relations", []):
+            if not isinstance(ir, dict):
+                continue
+            src_iid = _fuzzy_resolve_entity(ir.get("source", ""), instance_name_to_id)
+            tgt_iid = _fuzzy_resolve_entity(ir.get("target", ""), instance_name_to_id)
+            if not src_iid or not tgt_iid:
+                continue
+            ir_type = (ir.get("type") or "RELATED").strip()
+            if ir_type in ("关联", "未知", "相关", "其他", "") or not ir_type.isascii():
+                continue
+            src_concept_id = instance_id_to_entity_id.get(src_iid)
+            tgt_concept_id = instance_id_to_entity_id.get(tgt_iid)
+            if not src_concept_id or not tgt_concept_id:
+                continue
+            concept_key = (src_concept_id, tgt_concept_id, ir_type)
+            rel_def_id = relation_id_by_key.get(concept_key)
+            if not rel_def_id:
+                rel_def_id = str(uuid.uuid4())
+                db.add(Relation(
+                    id=rel_def_id, ontology_id=task.ontology_id,
+                    source_entity=src_concept_id, target_entity=tgt_concept_id,
+                    type=ir_type, confidence=ir.get("confidence", 0.8),
+                ))
+                existing_rel_set.add(concept_key)
+                relation_id_by_key[concept_key] = rel_def_id
+                # the FK from entity_instance_relations to relations must see
+                # this row on insert — flush now rather than trust autoflush
+                # ordering across the two tables
+                db.flush()
+            edge_key = (src_iid, tgt_iid, rel_def_id)
+            if edge_key not in existing_inst_rel_set:
+                db.add(EntityInstanceRelation(
+                    id=str(uuid.uuid4()), ontology_id=task.ontology_id,
+                    source_instance_id=src_iid, target_instance_id=tgt_iid,
+                    relation_definition_id=rel_def_id,
+                    properties={"confidence": ir.get("confidence", 0.8)},
+                ))
+                existing_inst_rel_set.add(edge_key)
 
         # ── Keyword matching helpers (unchanged) ─────────────────────────────
         all_entity_names = [
@@ -584,6 +773,12 @@ def run_extraction(self, task_id: str):
             if not llm_linked:
                 combined = " ".join(filter(None, [name_cn, r_data.get("definition",""), r_data.get("description","")]))
                 llm_linked = _match_entities(combined, all_entity_names)
+            # A rule-category label (e.g. "反欺诈规则") is not a concept entity —
+            # it belongs in logic_rules, not entities — so a linked_entities
+            # reference to one is a dangling reference, same as a relation
+            # pointing at an entity the model never extracted; drop it rather
+            # than let it surface as a broken-reference validation warning.
+            llm_linked = [n for n in llm_linked if n in entity_name_to_id]
 
             if name_cn in existing_rule_map:
                 rule = existing_rule_map[name_cn]
@@ -623,6 +818,9 @@ def run_extraction(self, task_id: str):
             if not linked_ents:
                 combined = " ".join(filter(None, [name_cn, a_data.get("description","")]))
                 linked_ents = _match_entities(combined, all_entity_names)
+            # Same dangling-reference cleanup as logic_rules above — a
+            # rule-category label is not a concept entity.
+            linked_ents = [n for n in linked_ents if n in entity_name_to_id]
 
             linked_logic_names = a_data.get("linked_logic_names", [])
             linked_ids = [logic_name_to_id[n] for n in linked_logic_names if n in logic_name_to_id]
@@ -661,6 +859,50 @@ def run_extraction(self, task_id: str):
         if project:
             project.status = "created"
 
+        # graph-engineering playbook diagnostics: computed over the ontology's
+        # full saved graph (not just this run's output), so a stale connected-
+        # components count from a prior run never masks today's actual state.
+        # session autoflush is off (app/database.py), so this run's own
+        # entity/relation adds above must be flushed before querying them back.
+        db.flush()
+        from app.services.graph_diagnostics import compute_graph_diagnostics
+        final_entities = db.query(Entity).filter(Entity.ontology_id == task.ontology_id).all()
+        final_relations = db.query(Relation).filter(Relation.ontology_id == task.ontology_id).all()
+        graph_diagnostics = compute_graph_diagnostics(
+            [{"id": e.id, "name_cn": e.name_cn} for e in final_entities],
+            [(r.source_entity, r.target_entity) for r in final_relations],
+        )
+        task.validation_report = {**(task.validation_report or {}), "graph_diagnostics": graph_diagnostics}
+
+        # hub-node summarization (playbook Section V.A): only entities with
+        # enough graph connectivity to benefit from cross-relation synthesis;
+        # re-summarizes only when degree changed since the last summary, so a
+        # re-run doesn't re-call the model for an unchanged hub every time
+        _HUB_DEGREE_THRESHOLD = 3
+        degree_by_id: dict = {e.id: 0 for e in final_entities}
+        relation_lines_by_id: dict = {}
+        name_by_id = {e.id: e.name_cn for e in final_entities}
+        for r in final_relations:
+            if r.source_entity in degree_by_id:
+                degree_by_id[r.source_entity] += 1
+            if r.target_entity in degree_by_id:
+                degree_by_id[r.target_entity] += 1
+            line = f"({name_by_id.get(r.source_entity, r.source_entity)}) --[{r.type}]--> ({name_by_id.get(r.target_entity, r.target_entity)})"
+            relation_lines_by_id.setdefault(r.source_entity, []).append(line)
+            relation_lines_by_id.setdefault(r.target_entity, []).append(line)
+
+        from app.services.llm_service import summarize_entity
+        for e in final_entities:
+            degree = degree_by_id.get(e.id, 0)
+            if degree < _HUB_DEGREE_THRESHOLD:
+                continue
+            if (e.properties or {}).get("summary_degree") == degree:
+                continue  # graph neighborhood unchanged since last summary
+            relations_text = "\n".join(sorted(set(relation_lines_by_id.get(e.id, []))))
+            profile = summarize_entity(e.name_cn, e.description or "", relations_text, config_dict, reasoning_model_name)
+            if profile:
+                e.properties = {**(e.properties or {}), **profile, "summary_degree": degree}
+
         task.status   = "completed"
         task.progress = {"stage": "done", "pct": 100}
         db.commit()
@@ -676,6 +918,12 @@ def run_extraction(self, task_id: str):
             if task:
                 task.status = "failed"
                 task.error  = str(e)
+                # the router set the Ontology to "creating" when this task was
+                # queued — on failure it must go back to "draft" or it stays
+                # stuck showing "creating" forever with no task left to finish it
+                project = db.query(OntologyProject).filter(OntologyProject.id == task.ontology_id).first()
+                if project and project.status == "creating":
+                    project.status = "draft"
                 db.commit()
         except Exception:
             # session 可能已损坏，用新 session 兜底标记失败，避免任务永远卡在 running
@@ -686,6 +934,9 @@ def run_extraction(self, task_id: str):
                 if task:
                     task.status = "failed"
                     task.error  = str(e)
+                    project = fresh_db.query(OntologyProject).filter(OntologyProject.id == task.ontology_id).first()
+                    if project and project.status == "creating":
+                        project.status = "draft"
                     fresh_db.commit()
                 fresh_db.close()
             except Exception:
@@ -700,6 +951,8 @@ def _sync_neo4j(db, ontology_id: str) -> None:
         from app.services.v2.graph.neo4j_service import Neo4jService
         from app.models.entity import Entity
         from app.models.relation import Relation
+        from app.models.entity_instance import EntityInstance
+        from app.models.entity_instance_relation import EntityInstanceRelation
 
         svc = Neo4jService()
         if not svc.available:
@@ -745,6 +998,39 @@ def _sync_neo4j(db, ontology_id: str) -> None:
                 tgt_label=tgt_type, tgt_key=r.target_entity,
                 rel_type=rel_type,
                 props={"id": r.id, "ontology_id": ontology_id, "confidence": r.confidence or 0.85},
+            )
+
+        # 具体命名实例（如 2型糖尿病、阿司匹林）作为独立节点同步，标签在概念类型
+        # 后加 Instance 后缀，与概念节点区分开，避免图查询把概念和实例混为一谈
+        instances = db.query(EntityInstance).filter(EntityInstance.ontology_id == ontology_id).all()
+        instance_label_map: dict[str, str] = {}
+        for inst in instances:
+            concept_type = entity_type_map.get(inst.entity_id, "OntologyEntity")
+            label = f"{concept_type}Instance"
+            instance_label_map[inst.id] = label
+            props = {
+                **(inst.row_data or {}),
+                "id": inst.id,
+                "ontology_id": ontology_id,
+                "entity_id": inst.entity_id,
+                "name_cn": inst.row_identity,
+            }
+            svc.upsert_entity(label, props, key_field="id")
+
+        # 实例级关系（语义概念层面的 relation 已在上面写入；具体实例之间的边只
+        # 存在于 Neo4j，不进 Postgres relations 表）
+        inst_relations = db.query(EntityInstanceRelation).filter(
+            EntityInstanceRelation.ontology_id == ontology_id).all()
+        relation_type_by_id = {r.id: r.type for r in relations}
+        for ir in inst_relations:
+            src_label = instance_label_map.get(ir.source_instance_id, "OntologyEntityInstance")
+            tgt_label = instance_label_map.get(ir.target_instance_id, "OntologyEntityInstance")
+            rel_type = (relation_type_by_id.get(ir.relation_definition_id) or "RELATED").upper().replace(" ", "_").replace("-", "_")
+            svc.upsert_relation(
+                src_label=src_label, src_key=ir.source_instance_id,
+                tgt_label=tgt_label, tgt_key=ir.target_instance_id,
+                rel_type=rel_type,
+                props={"id": ir.id, "ontology_id": ontology_id, **(ir.properties or {})},
             )
 
         svc.close()

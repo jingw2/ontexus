@@ -76,6 +76,19 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "agent.retention_purge": {"queue": QUEUE_HOUSEKEEPING},
 }
 
+# These four share one queue/worker pool. Without acks_late + a time limit, a
+# single hung LLM call (or a worker dying mid-task) permanently wedges one of
+# `--concurrency` slots with nothing to free it — every later task on this
+# queue then sits "queued" forever with no worker left to pick it up.
+ARTIFACT_EXTRACTION_TASK_NAMES = (
+    "app.tasks.extraction.run_extraction",
+    "app.tasks.audit.run_audit",
+    "app.tasks.v2.mapping_apply.mapping_apply_task",
+    "app.tasks.v2.pipeline_run.pipeline_run_task",
+)
+ARTIFACT_EXTRACTION_SOFT_TIME_LIMIT_SECONDS = 1800
+ARTIFACT_EXTRACTION_HARD_TIME_LIMIT_SECONDS = 1860
+
 
 # ── Bounded refresh worker settings ─────────────────────────────────────
 @dataclass(frozen=True)
@@ -227,3 +240,12 @@ def configure_celery_topology(celery_app: Celery) -> None:
         }
         for name in REFRESH_TASK_NAMES
     }
+    celery_app.conf.task_annotations.update({
+        name: {
+            "acks_late": True,
+            "reject_on_worker_lost": True,
+            "soft_time_limit": ARTIFACT_EXTRACTION_SOFT_TIME_LIMIT_SECONDS,
+            "time_limit": ARTIFACT_EXTRACTION_HARD_TIME_LIMIT_SECONDS,
+        }
+        for name in ARTIFACT_EXTRACTION_TASK_NAMES
+    })

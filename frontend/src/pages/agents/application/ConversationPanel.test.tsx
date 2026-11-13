@@ -14,6 +14,20 @@ function renderPanel(messages: AgentMessage[], stream: StreamState = initialStre
 }
 
 describe('P4A-CONVERSATION', () => {
+  it('hides prior-turn evidence synchronously when the turn changes', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockImplementation(url => url.includes('/old/')
+      ? Promise.resolve({ items: [{ sequence: 1, event_type: 'final_response', payload: { audit_event_id: 'old-audit' } }] }) as never
+      : new Promise(() => {}))
+    const props = { messages: [], stream: { ...initialStreamState, terminal: true }, clarification: null,
+      pendingApprovalId: null, onSend: () => {}, onAnswerClarification: () => {}, onApprovalResolved: () => {}, onRetry: () => {} }
+    try {
+      const view = render(<ConversationPanel {...props} turnId="old" />)
+      await screen.findByText('old-audit')
+      view.rerender(<ConversationPanel {...props} turnId="new" />)
+      expect(screen.queryByTestId('journey-evidence')).toBeNull()
+    } finally { get.mockRestore() }
+  })
+
   it('strips the legacy canned "Answer for …" prefix from persisted messages', () => {
     const messages: AgentMessage[] = [{
       id: 'm-1', session_id: 's-1', turn_id: 't-1', role: 'assistant',

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -19,6 +19,12 @@ from typing import Optional
 from app.database import SessionLocal
 from app.deps import get_current_user, require_editor
 from app.models.v2.connection import Connection
+from app.models.user import User
+from app.services.connection.config import (
+    ConnectionConfigError,
+    build_connector_config,
+    safe_connection_error,
+)
 from app.services.connection.registry import get_connector
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -53,7 +59,7 @@ class ConnectionResponse(BaseModel):
 # ── 端点 ──────────────────────────────────────────────────────
 
 @router.post("", response_model=ConnectionResponse, status_code=201)
-def create_connection(body: ConnectionCreate, db: Session = Depends(get_db), _=Depends(require_editor)):
+def create_connection(body: ConnectionCreate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
     """创建连接。config 加密后存储。"""
     from app.services import encryption_service
     encrypted_config = {"_encrypted": encryption_service.encrypt(json.dumps(body.config))}
@@ -63,6 +69,7 @@ def create_connection(body: ConnectionCreate, db: Session = Depends(get_db), _=D
         kind=body.kind,
         config=encrypted_config,
         status="inactive",
+        created_by=current_user.id,
     )
     db.add(conn)
     db.commit()
@@ -94,35 +101,36 @@ def _build_db_config(raw_config: dict, db_type: str) -> dict:
     connection_string，这里组装成 SQLAlchemy 可用的连接 URL。
     密码中的特殊字符通过 urllib.parse.quote 编码以避免 URL 解析歧义。
     """
-    from urllib.parse import quote
-    host = raw_config.get("host", "localhost")
-    port = raw_config.get("port", "3306" if db_type == "mysql" else "5432")
-    user = raw_config.get("user", "")
-    password = raw_config.get("password", "")
-    database = raw_config.get("database", "")
-    # 密码/用户名/库名中的特殊字符（如 @ : / # 空格等）必须 URL 编码，
-    # 否则 SQLAlchemy 的 URL 解析器会将 @ 等视为 URL 结构分隔符而非密码的一部分。
-    # host 不编码（IPv6 地址用 [] 括起，需原样保留）。
-    scheme = "mysql+pymysql" if db_type == "mysql" else "postgresql"
-    conn_str = f"{scheme}://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}/{quote(database, safe='')}"
-    config = dict(raw_config)
-    config["connection_string"] = conn_str
-    return config
+    return build_connector_config(db_type, raw_config)
+
+
+def _load_connection_connector(
+    conn: Connection,
+    *,
+    resource: str | None = None,
+):
+    """Build a connector from an encrypted Connection row.
+
+    Keeping this in one helper ensures API tests, pipeline execution, and
+    refresh workers all resolve the same saved database configuration.
+    """
+    config = build_connector_config(conn.kind, conn.config, resource=resource)
+    return get_connector(conn.kind, config)
 
 
 @router.post("/test-config")
 def test_connection_config(body: TestConfigBody, _=Depends(require_editor)):
     """测试连接配置（无需先创建 Connection，供 Builder 使用）"""
     try:
-        cfg = body.config
-        if body.type in ("mysql", "postgresql", "postgres"):
-            db_type = "postgres" if "postgres" in body.type else "mysql"
-            cfg = _build_db_config(cfg, db_type)
+        cfg = build_connector_config(body.type, body.config)
         connector = get_connector(body.type, cfg)
         ok = connector.test_connection()
-        return {"success": ok}
+        result = {"success": ok}
+        if not ok:
+            result["detail"] = getattr(connector, "last_error", None) or "connection test failed"
+        return result
     except Exception as e:
-        return {"success": False, "detail": str(e)}
+        return {"success": False, "detail": safe_connection_error(e)}
 
 
 @router.post("/{connection_id}/test")
@@ -132,27 +140,67 @@ def test_connection(connection_id: str, db: Session = Depends(get_db), _=Depends
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    from app.services import encryption_service
-    raw = conn.config.get("_encrypted", "")
     try:
-        config = json.loads(encryption_service.decrypt(raw)) if raw else conn.config
-    except Exception:
-        config = conn.config
-
-    # 与 test-config 一样，ConnectionsTab 存储的是独立字段而非 connection_string
-    if conn.kind in ("mysql", "postgres"):
-        config = _build_db_config(config, conn.kind)
-
-    try:
-        connector = get_connector(conn.kind, config)
+        connector = _load_connection_connector(conn)
         ok = connector.test_connection()
         conn.status = "active" if ok else "error"
         db.commit()
-        return {"success": ok, "status": conn.status}
+        result = {"success": ok, "status": conn.status}
+        if not ok:
+            result["detail"] = getattr(connector, "last_error", None) or "connection test failed"
+        return result
     except Exception as e:
         conn.status = "error"
         db.commit()
-        return {"success": False, "status": "error", "detail": str(e)}
+        return {"success": False, "status": "error", "detail": safe_connection_error(e)}
+
+
+@router.get("/{connection_id}/resources")
+def list_connection_resources(
+    connection_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(require_editor),
+):
+    """List tables/collections exposed by a saved connection."""
+    conn = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    try:
+        connector = _load_connection_connector(conn)
+        resources = connector.list_resources()
+        return {"connection_id": connection_id, "resources": resources}
+    except (ConnectionConfigError, ValueError) as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            detail=f"Unable to list resources for connection '{conn.name}': {safe_connection_error(exc)}",
+        ) from exc
+
+
+@router.get("/{connection_id}/resources/{resource:path}/sample")
+def sample_connection_resource(
+    connection_id: str,
+    resource: str,
+    limit: int = Query(20, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _=Depends(require_editor),
+):
+    """Read a bounded sample from one saved connection resource."""
+    conn = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    try:
+        connector = _load_connection_connector(conn, resource=resource)
+        rows = connector.pull_sample(resource, limit=limit)
+        return {"connection_id": connection_id, "resource": resource, "rows": rows}
+    except (ConnectionConfigError, ValueError) as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            detail=f"Unable to read resource '{resource}': {safe_connection_error(exc)}",
+        ) from exc
 
 
 class RefreshConfigurationUpdate(BaseModel):
