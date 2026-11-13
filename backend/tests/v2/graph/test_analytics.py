@@ -63,3 +63,39 @@ def test_node_degree_with_result():
     result = svc.node_degree("ont-1", "node-1")
     assert result["in_degree"] == 3
     assert result["out_degree"] == 7
+
+
+def test_graph_traversals_scope_every_returned_node_to_ontology():
+    svc, mock_neo4j = make_analytics(available=True)
+    mock_neo4j.run_cypher.return_value = []
+
+    svc.get_neighbors("ont-1", "node-1")
+    neighbors_query = mock_neo4j.run_cypher.call_args.args[0]
+    assert "all(node IN nodes(path) WHERE node.ontology_id = $ontology_id)" in neighbors_query
+
+    svc.shortest_path("ont-1", "a", "b")
+    path_query = mock_neo4j.run_cypher.call_args.args[0]
+    assert "all(node IN nodes(p) WHERE node.ontology_id = $ontology_id)" in path_query
+
+    svc.node_degree("ont-1", "node-1")
+    degree_query = mock_neo4j.run_cypher.call_args.args[0]
+    assert "out_neighbor.ontology_id = $ontology_id" in degree_query
+    assert "in_neighbor.ontology_id = $ontology_id" in degree_query
+
+    svc.top_connected_nodes("ont-1")
+    top_query = mock_neo4j.run_cypher.call_args.args[0]
+    assert "neighbor.ontology_id = $ontology_id" in top_query
+
+
+def test_graph_neighbors_route_scopes_every_path_node(monkeypatch):
+    from app.routers.v2 import graph
+
+    fake_neo4j = MagicMock()
+    fake_neo4j.available = True
+    fake_neo4j.run_cypher.return_value = []
+    monkeypatch.setattr(graph, "get_neo4j", lambda: fake_neo4j)
+
+    graph.get_neighbors("ont-1", "node-1")
+
+    query = fake_neo4j.run_cypher.call_args.args[0]
+    assert "all(node IN nodes(path) WHERE node.ontology_id = $ontology_id)" in query

@@ -48,6 +48,17 @@ def schema():
 def test_delete_ontology_with_instance_relations_does_not_hit_dependent_data(schema, monkeypatch):
     engine = create_engine(_scoped_url(schema))
     session = sessionmaker(bind=engine)()
+    try:
+        _run_delete_scenario(session)
+    finally:
+        # an open transaction would block the fixture's DROP SCHEMA forever
+        session.close()
+        engine.dispose()
+
+
+def _run_delete_scenario(session):
+    from app.models.user import User
+    from app.services.ontology_access import backfill_creator_grants
 
     oid, u = "o-del-1", "u-del-1"
     session.execute(text(
@@ -86,10 +97,11 @@ def test_delete_ontology_with_instance_relations_does_not_hit_dependent_data(sch
     ), {"o": oid}).scalar_one()
     assert outbox_before > 0
 
-    delete_ontology(ontology_id=oid, db=session)
+    # rows were inserted via direct SQL, bypassing create_ontology's creator grant
+    backfill_creator_grants(session)
+    delete_ontology(ontology_id=oid, db=session, current_user=session.get(User, u))
 
     remaining = session.execute(text(
         "SELECT count(*) FROM ontology_projects WHERE id = :o"
     ), {"o": oid}).scalar_one()
     assert remaining == 0
-    session.close()

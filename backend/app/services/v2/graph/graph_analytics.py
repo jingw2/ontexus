@@ -20,6 +20,7 @@ class GraphAnalyticsService:
         query = f"""
         MATCH path = (n)-[r*1..{depth}]-(m)
         WHERE elementId(n) = $node_id AND n.ontology_id = $ontology_id
+          AND all(node IN nodes(path) WHERE node.ontology_id = $ontology_id)
         RETURN n, relationships(path) AS rels, nodes(path) AS all_nodes
         LIMIT 100
         """
@@ -56,6 +57,7 @@ class GraphAnalyticsService:
         WHERE elementId(s) = $src AND elementId(t) = $tgt
           AND s.ontology_id = $ontology_id AND t.ontology_id = $ontology_id
         MATCH p = shortestPath((s)-[*]-(t))
+        WHERE all(node IN nodes(p) WHERE node.ontology_id = $ontology_id)
         RETURN [n IN nodes(p) | {id: elementId(n), labels: labels(n), name: n.name_cn}] AS path_nodes,
                length(p) AS path_length
         """
@@ -80,8 +82,10 @@ class GraphAnalyticsService:
         query = """
         MATCH (n)
         WHERE elementId(n) = $node_id AND n.ontology_id = $ontology_id
-        OPTIONAL MATCH (n)-[out]->()
-        OPTIONAL MATCH ()-[in]->(n)
+        OPTIONAL MATCH (n)-[out]->(out_neighbor)
+        WHERE out_neighbor.ontology_id = $ontology_id
+        OPTIONAL MATCH (in_neighbor)-[in]->(n)
+        WHERE in_neighbor.ontology_id = $ontology_id
         RETURN count(DISTINCT out) AS out_degree, count(DISTINCT in) AS in_degree
         """
         try:
@@ -102,8 +106,8 @@ class GraphAnalyticsService:
         if not self._neo4j.available:
             return []
         query = """
-        MATCH (n)-[r]-()
-        WHERE n.ontology_id = $ontology_id
+        MATCH (n)-[r]-(neighbor)
+        WHERE n.ontology_id = $ontology_id AND neighbor.ontology_id = $ontology_id
         RETURN elementId(n) AS node_id,
                labels(n) AS labels,
                n.name_cn AS name,

@@ -11,6 +11,7 @@ PostgreSQL-marked tests use TEST_DATABASE_URL; SQLite never substitutes.
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -79,7 +80,7 @@ def access_db():
     engine.dispose()
 
 
-def _insert_user(Session, username, role="editor", active=True, domain=True):
+def _insert_user(Session, username, role="editor", active=True, domain=True, domain_id=None):
     domain_clause = ", security_domain_id" if domain else ""
     domain_value = ", :domain" if domain else ""
     params = {
@@ -90,7 +91,7 @@ def _insert_user(Session, username, role="editor", active=True, domain=True):
         "active": active,
     }
     if domain:
-        params["domain"] = DEFAULT_DOMAIN
+        params["domain"] = domain_id or DEFAULT_DOMAIN
     with Session() as session:
         session.execute(text(
             f"INSERT INTO users (id, username, email, password_hash, role, is_active, created_at, updated_at{domain_clause}) "
@@ -101,12 +102,12 @@ def _insert_user(Session, username, role="editor", active=True, domain=True):
         return user_id
 
 
-def _insert_ontology(Session, name, created_by):
+def _insert_ontology(Session, name, created_by, domain_id=None):
     with Session() as session:
         session.execute(text(
             "INSERT INTO ontology_projects (id, name, domain, version, status, created_by, created_at, updated_at, security_domain_id) "
             "VALUES (:id, :name, 'test', 'v0.1', 'draft', :created_by, now(), now(), :domain)"
-        ), {"id": str(uuid.uuid4()), "name": name, "created_by": created_by, "domain": DEFAULT_DOMAIN})
+        ), {"id": str(uuid.uuid4()), "name": name, "created_by": created_by, "domain": domain_id or DEFAULT_DOMAIN})
         ontology_id = session.execute(text("SELECT id FROM ontology_projects WHERE name=:n"), {"n": name}).scalar_one()
         session.commit()
         return ontology_id
@@ -501,3 +502,166 @@ def test_zz_router_grant_and_remediation_methods(access_db):
         )
         assert missing.status_code == 404
     test_app.dependency_overrides.clear()
+
+
+def test_zz_require_project_grant_enforces_actor_state_domain_window_and_role(access_db):
+    from types import SimpleNamespace
+
+    from app.models.user import User
+    from app.services.ontology_access import (
+        GrantDenied,
+        create_grant,
+        creator_grant,
+        require_project_grant,
+    )
+
+    Session, _ = access_db
+    owner = _insert_user(Session, "guard-owner", role="admin")
+    reader = _insert_user(Session, "guard-reader", role="editor")
+    target = _insert_user(Session, "guard-target", role="viewer")
+    ontology_id = _insert_ontology(Session, "Guard ontology", owner)
+
+    with Session() as session:
+        creator_grant(session, ontology_id, session.get(User, owner))
+        create_grant(
+            session,
+            ontology_id=ontology_id,
+            user_id=reader,
+            capabilities=["discover", "read", "edit", "publish"],
+            base_revision=0,
+            actor_id=owner,
+        )
+        reader_user = session.get(User, reader)
+        assert require_project_grant(session, reader_user, ontology_id, "edit")
+
+        reader_user.role = "viewer"
+        session.flush()
+        with pytest.raises(GrantDenied):
+            require_project_grant(session, reader_user, ontology_id, "edit")
+        assert require_project_grant(session, reader_user, ontology_id, "read")
+
+        reader_user.role = "editor"
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_from=:valid_from "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {
+            "valid_from": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "o": ontology_id,
+            "u": reader,
+        })
+        with pytest.raises(GrantDenied):
+            require_project_grant(session, reader_user, ontology_id, "read")
+
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_from=NULL, valid_until=:valid_until "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {
+            "valid_until": datetime.now(timezone.utc) - timedelta(seconds=1),
+            "o": ontology_id,
+            "u": reader,
+        })
+        with pytest.raises(GrantDenied):
+            require_project_grant(session, reader_user, ontology_id, "read")
+
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_until=NULL WHERE ontology_id=:o AND user_id=:u"
+        ), {"o": ontology_id, "u": reader})
+        with pytest.raises(GrantDenied):
+            require_project_grant(
+                session,
+                SimpleNamespace(
+                    id=reader,
+                    is_active=True,
+                    role="editor",
+                    security_domain_id="00000000-0000-0000-0000-000000000099",
+                ),
+                ontology_id,
+                "read",
+            )
+
+        reader_user.is_active = False
+        session.flush()
+        with pytest.raises(GrantDenied):
+            require_project_grant(session, reader_user, ontology_id, "read")
+
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_until=:valid_until "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {
+            "valid_until": datetime.now(timezone.utc) - timedelta(seconds=1),
+            "o": ontology_id,
+            "u": owner,
+        })
+        with pytest.raises(GrantDenied):
+            create_grant(
+                session,
+                ontology_id=ontology_id,
+                user_id=target,
+                capabilities=["discover", "read"],
+                base_revision=0,
+                actor_id=owner,
+            )
+
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_until=NULL "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {"o": ontology_id, "u": owner})
+        session.execute(text("UPDATE users SET role='viewer' WHERE id=:u"), {"u": owner})
+        with pytest.raises(GrantDenied):
+            create_grant(
+                session,
+                ontology_id=ontology_id,
+                user_id=target,
+                capabilities=["discover", "read"],
+                base_revision=0,
+                actor_id=owner,
+            )
+
+
+def test_zz_discoverable_ontology_ids_filter_capability_window_domain_and_role(access_db):
+    from app.models.user import User
+    from app.services.ontology_access import (
+        create_grant,
+        creator_grant,
+        discoverable_ontology_ids,
+    )
+
+    Session, _ = access_db
+    owner = _insert_user(Session, "discover-owner", role="admin")
+    viewer = _insert_user(Session, "discover-viewer", role="viewer")
+    same = _insert_ontology(Session, "Discover same", owner)
+    no_discover = _insert_ontology(Session, "Discover no capability", owner)
+    expired = _insert_ontology(Session, "Discover expired", owner)
+    future = _insert_ontology(Session, "Discover future", owner)
+
+    with Session() as session:
+        creator_grant(session, same, session.get(User, owner))
+        creator_grant(session, no_discover, session.get(User, owner))
+        creator_grant(session, expired, session.get(User, owner))
+        creator_grant(session, future, session.get(User, owner))
+        for oid, capabilities in (
+            (same, ["discover", "read"]),
+            (no_discover, ["read"]),
+            (expired, ["discover", "read"]),
+            (future, ["discover", "read"]),
+        ):
+            create_grant(
+                session,
+                ontology_id=oid,
+                user_id=viewer,
+                capabilities=capabilities,
+                base_revision=0,
+                actor_id=owner,
+            )
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_until=:when "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {"when": datetime.now(timezone.utc) - timedelta(seconds=1), "o": expired, "u": viewer})
+        session.execute(text(
+            "UPDATE ontology_project_access_grants SET valid_from=:when "
+            "WHERE ontology_id=:o AND user_id=:u"
+        ), {"when": datetime.now(timezone.utc) + timedelta(minutes=5), "o": future, "u": viewer})
+        actor = session.get(User, viewer)
+        ids = session.execute(discoverable_ontology_ids(session, actor)).scalars().all()
+
+    assert ids == [same]

@@ -21,6 +21,8 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from app.models.ontology_access import OntologyProjectAccessGrant
+from app.models.ontology import OntologyProject
+from app.models.user import User
 from app.services.auth_service import get_user_by_id
 from app.services.governance_audit import enqueue_audit
 
@@ -78,7 +80,7 @@ def _enqueue_audit(db: Session, *, security_domain_id: str, correlation_id: str,
 def current_grant(db: Session, ontology_id: str, user_id: str) -> dict | None:
     row = db.execute(
         sa.text(
-            "SELECT id, ontology_id, user_id, capabilities, revision, status, created_by, "
+            "SELECT id, ontology_id, user_id, security_domain_id, capabilities, revision, status, created_by, "
             "valid_from, valid_until, revoked_by, created_at, updated_at, revoked_at "
             "FROM ontology_project_access_grants "
             "WHERE ontology_id = :o AND user_id = :u AND status = 'active'"
@@ -226,10 +228,10 @@ def backfill_creator_grants(db: Session) -> dict:
 
 
 def _require_actor(db: Session, actor_id: str, ontology_id: str) -> dict:
-    grant = current_grant(db, ontology_id, actor_id)
-    if grant is None or "edit" not in grant["capabilities"]:
-        raise GrantDenied("actor lacks edit on this ontology")
-    return grant
+    actor = get_user_by_id(db, actor_id)
+    if actor is None:
+        raise GrantDenied("actor required")
+    return require_project_grant(db, actor, ontology_id, "edit")
 
 
 def _check_ceiling(role: str, capabilities: list[str]) -> None:
@@ -426,12 +428,109 @@ def recover_owner(db: Session, *, ontology_id: str, base_finding_revision: int,
 
 
 def require_project_grant(db: Session, actor, ontology_id: str, capability: str) -> dict:
-    if actor is None:
+    if actor is None or not getattr(actor, "id", None) or not getattr(actor, "is_active", False):
         raise GrantDenied("actor required")
-    grant = current_grant(db, ontology_id, actor.id)
-    if grant is None or capability not in grant["capabilities"]:
+
+    if capability not in CAPABILITIES:
+        raise GrantDenied("unknown capability")
+
+    row = db.execute(
+        sa.text(
+            "SELECT g.id, g.ontology_id, g.user_id, g.security_domain_id, g.capabilities, "
+            "g.revision, g.status, g.created_by, g.valid_from, g.valid_until, g.revoked_by, "
+            "g.created_at, g.updated_at, g.revoked_at, "
+            "o.security_domain_id AS ontology_security_domain_id, "
+            "u.security_domain_id AS actor_security_domain_id, u.is_active AS actor_is_active, "
+            "u.role AS actor_role "
+            "FROM ontology_project_access_grants g "
+            "JOIN ontology_projects o ON o.id = g.ontology_id "
+            "JOIN users u ON u.id = g.user_id "
+            "WHERE g.ontology_id = :o AND g.user_id = :u"
+        ),
+        {
+            "o": ontology_id,
+            "u": actor.id,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise GrantDenied("grant not held")
+
+    grant = _row_dict(row)
+    now = datetime.now(timezone.utc)
+    valid_from = _as_utc(grant["valid_from"])
+    valid_until = _as_utc(grant["valid_until"])
+    actor_domain = getattr(actor, "security_domain_id", None)
+    if (
+        not row["actor_is_active"]
+        or row["actor_security_domain_id"] != actor_domain
+        or row["ontology_security_domain_id"] != actor_domain
+        or grant["security_domain_id"] != actor_domain
+        or grant["status"] != "active"
+        or (valid_from is not None and valid_from > now)
+        or (valid_until is not None and now >= valid_until)
+        or capability not in grant["capabilities"]
+        or capability not in ROLE_CEILINGS.get(row["actor_role"], ROLE_CEILINGS["viewer"])
+    ):
         raise GrantDenied("grant not held")
     return grant
+
+
+def _as_utc(value):
+    """Treat naive database timestamps as UTC for grant validity checks."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def discoverable_ontology_ids(db: Session, actor):
+    """Return a SQL selectable of ontology IDs the actor may discover.
+
+    This intentionally remains a selectable so callers can apply the grant
+    predicate before counting, paginating, or aggregating project rows.
+    Direct ``read`` grants without ``discover`` remain valid for ID-based
+    reads and therefore do not appear here.
+    """
+    if actor is None or not getattr(actor, "id", None) or not getattr(actor, "is_active", False):
+        return sa.select(OntologyProject.id).where(sa.false())
+
+    capability = "discover"
+    if capability not in ROLE_CEILINGS.get(getattr(actor, "role", None), ROLE_CEILINGS["viewer"]):
+        return sa.select(OntologyProject.id).where(sa.false())
+
+    now = datetime.now(timezone.utc)
+    grant = OntologyProjectAccessGrant
+    user = User
+    ontology = OntologyProject
+    return (
+        sa.select(ontology.id)
+        .join(
+            grant,
+            sa.and_(
+                grant.ontology_id == ontology.id,
+                grant.security_domain_id == ontology.security_domain_id,
+            ),
+        )
+        .join(
+            user,
+            sa.and_(
+                user.id == grant.user_id,
+                user.security_domain_id == grant.security_domain_id,
+            ),
+        )
+        .where(
+            grant.user_id == actor.id,
+            grant.security_domain_id == getattr(actor, "security_domain_id", None),
+            user.security_domain_id == getattr(actor, "security_domain_id", None),
+            user.is_active.is_(True),
+            grant.status == "active",
+            sa.or_(grant.valid_from.is_(None), grant.valid_from <= now),
+            sa.or_(grant.valid_until.is_(None), now < grant.valid_until),
+            sa.cast(grant.capabilities, sa.Text).like('%"discover"%'),
+        )
+        .distinct()
+    )
 
 
 def _json_list(values) -> str:

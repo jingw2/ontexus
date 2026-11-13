@@ -3,6 +3,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user
 from app.services import export_service
+from app.services.ontology_access import GrantDenied, require_project_grant
 
 router = APIRouter()
 
@@ -21,8 +22,12 @@ def export_ontology(
     ontology_id: str,
     format: str = Query("json", pattern="^(json|yaml|csv|ttl|html|cypher|tugraph)$"),
     db: Session = Depends(get_db),
-    _=Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
+    try:
+        require_project_grant(db, current_user, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
     if format not in FORMAT_MAP:
         raise HTTPException(400, f"Unsupported format: {format}")
     content_type, ext, fn = FORMAT_MAP[format]

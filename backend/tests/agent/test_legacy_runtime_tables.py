@@ -160,8 +160,11 @@ def test_audit_and_instance_writes_no_longer_500(legacy_schema):
     from app.deps import get_db
     from app.routers import audit as audit_router
     from app.services.auth_service import create_access_token
+    from app.services.ontology_access import backfill_creator_grants
 
     with Session() as session:
+        # the ontology was inserted via direct SQL, bypassing create_ontology's creator grant
+        backfill_creator_grants(session)
         actor_id = session.execute(text("SELECT id FROM users WHERE username='lr-user'")).scalar_one()
     token = create_access_token({"sub": actor_id, "role": "admin"})
 

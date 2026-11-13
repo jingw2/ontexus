@@ -7,6 +7,7 @@ from app.models.file import UploadedFile
 from app.models.ontology import OntologyProject
 from app.schemas.file import FileOut
 from app.services.document_service import convert_document, is_usable_converted_text
+from app.services.ontology_access import GrantDenied, require_project_grant
 from app.config import settings
 
 router = APIRouter()
@@ -39,8 +40,16 @@ def _file_out(f: UploadedFile) -> dict:
     ).model_dump()
 
 
+def _grant(db: Session, actor, ontology_id: str, capability: str) -> dict:
+    try:
+        return require_project_grant(db, actor, ontology_id, capability)
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
+
 @router.get("")
-def list_files(ontology_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_files(ontology_id: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    _grant(db, current_user, ontology_id, "read")
     files = db.query(UploadedFile).filter(UploadedFile.ontology_id == ontology_id).all()
     return {"data": [_file_out(f) for f in files]}
 
@@ -49,11 +58,12 @@ async def upload_file(
     ontology_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _=Depends(require_editor)
+    current_user=Depends(require_editor),
 ):
+    _grant(db, current_user, ontology_id, "edit")
     project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not project:
-        raise HTTPException(404, "Ontology not found")
+        raise HTTPException(404, detail="ONTOLOGY_NOT_FOUND")
 
     ext_name = (file.filename or "").rsplit(".", 1)[-1].lower()
     allowed = {e.strip() for e in settings.allowed_upload_extensions.split(",") if e.strip()}
@@ -93,7 +103,8 @@ async def upload_file(
     return {"data": _file_out(db_file)}
 
 @router.delete("/{file_id}", status_code=204)
-def delete_file(ontology_id: str, file_id: str, db: Session = Depends(get_db), _=Depends(require_admin)):
+def delete_file(ontology_id: str, file_id: str, db: Session = Depends(get_db), current_user=Depends(require_admin)):
+    _grant(db, current_user, ontology_id, "edit")
     f = db.query(UploadedFile).filter(UploadedFile.id == file_id, UploadedFile.ontology_id == ontology_id).first()
     if not f:
         raise HTTPException(404, "File not found")

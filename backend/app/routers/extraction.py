@@ -9,6 +9,7 @@ from app.models.file import UploadedFile
 from app.models.ontology import OntologyProject
 from app.services.document_service import combine_converted_files
 from app.schemas.extraction import ExtractionRequest, ExtractionTaskOut
+from app.services.ontology_access import GrantDenied, require_project_grant
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("")
-def start_extraction(ontology_id: str, body: ExtractionRequest, db: Session = Depends(get_db), _=Depends(require_editor)):
+def start_extraction(ontology_id: str, body: ExtractionRequest, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
+    try:
+        require_project_grant(db, current_user, ontology_id, "edit")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
     project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not project:
         raise HTTPException(404, "Ontology not found")
@@ -67,7 +72,11 @@ def start_extraction(ontology_id: str, body: ExtractionRequest, db: Session = De
     return {"data": {"task_id": task.id}, "message": "Extraction queued"}
 
 @router.get("/status")
-def get_extraction_status(ontology_id: str, task_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_extraction_status(ontology_id: str, task_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        require_project_grant(db, current_user, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
     task = db.query(ExtractionTask).filter(ExtractionTask.id == task_id, ExtractionTask.ontology_id == ontology_id).first()
     if not task:
         raise HTTPException(404, "Task not found")

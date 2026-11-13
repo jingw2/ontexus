@@ -1,13 +1,15 @@
 """v2 Search API — 关键词/语义统一搜索"""
 from __future__ import annotations
 import json
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import cast, or_, String as SAString
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.deps import get_current_user
 from app.models.entity import Entity
+from app.models.user import User
+from app.services.ontology_access import GrantDenied, require_project_grant
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -18,6 +20,13 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _require_read(ontology_id: str, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    try:
+        require_project_grant(db, actor, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
 
 
 class SearchRequest(BaseModel):
@@ -54,7 +63,7 @@ def _sql_keyword_search(db: Session, ontology_id: str, q: str, n: int) -> list[d
     ]
 
 
-@router.get("/{ontology_id}/search/keyword")
+@router.get("/{ontology_id}/search/keyword", dependencies=[Depends(_require_read)])
 def keyword_search(
     ontology_id: str,
     q: str = Query(..., description="搜索词"),
@@ -71,7 +80,7 @@ def keyword_search(
     return {"results": results, "chroma_available": True, "query": q}
 
 
-@router.get("/{ontology_id}/search/semantic")
+@router.get("/{ontology_id}/search/semantic", dependencies=[Depends(_require_read)])
 def semantic_search(
     ontology_id: str,
     q: str = Query(..., description="搜索词"),
@@ -87,7 +96,7 @@ def semantic_search(
     return {"results": results, "chroma_available": True, "query": q}
 
 
-@router.post("/{ontology_id}/search")
+@router.post("/{ontology_id}/search", dependencies=[Depends(_require_read)])
 def unified_search(ontology_id: str, body: SearchRequest, db: Session = Depends(get_db)):
     """统一搜索端点"""
     from app.services.v2.vector.chroma_service import ChromaService

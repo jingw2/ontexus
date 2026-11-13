@@ -7,6 +7,8 @@ from app.models.user import User
 from app.services.publication.working_copy import OntologyWorkingCopyService
 from app.services.relation_dedup import dedupe_relation_edges as _dedupe_relation_edges
 from app.database import SessionLocal
+from sqlalchemy.orm import Session
+from app.services.ontology_access import GrantDenied, require_project_grant
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -24,12 +26,26 @@ def get_db():
         db.close()
 
 
+def _require_read(ontology_id: str, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    try:
+        require_project_grant(db, actor, ontology_id, "read")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
+
+def _require_edit(ontology_id: str, db: Session = Depends(get_db), actor: User = Depends(require_editor)):
+    try:
+        require_project_grant(db, actor, ontology_id, "edit")
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
+
 class CypherRequest(BaseModel):
     query: str
     params: dict = {}
 
 
-@router.get("/{ontology_id}/graph")
+@router.get("/{ontology_id}/graph", dependencies=[Depends(_require_read)])
 def get_graph(ontology_id: str, limit: int = 200, label_filter: str | None = None):
     """返回本体图谱数据 (Neovis.js 兼容格式)"""
     svc = get_neo4j()
@@ -95,7 +111,7 @@ def _sqlite_graph_data(ontology_id: str, limit: int = 200, label_filter: str | N
         db.close()
 
 
-@router.get("/{ontology_id}/graph/quality")
+@router.get("/{ontology_id}/graph/quality", dependencies=[Depends(_require_read)])
 def graph_quality(ontology_id: str):
     from app.models.entity import Entity
     from app.models.relation import Relation
@@ -146,7 +162,7 @@ def graph_quality(ontology_id: str):
         db.close()
 
 
-@router.get("/{ontology_id}/integrations/status")
+@router.get("/{ontology_id}/integrations/status", dependencies=[Depends(_require_read)])
 def integration_status(ontology_id: str):
     neo = get_neo4j()
     neo_available = neo.available
@@ -161,7 +177,7 @@ def integration_status(ontology_id: str):
     }
 
 
-@router.post("/{ontology_id}/graph/cypher")
+@router.post("/{ontology_id}/graph/cypher", dependencies=[Depends(_require_read)])
 def run_cypher(ontology_id: str, body: CypherRequest):
     """执行 Cypher 查询 (只读校验 + 强制 ontology_id 过滤)"""
     from app.services.v2.graph.cypher_builder import validate_readonly_cypher
@@ -180,15 +196,16 @@ def run_cypher(ontology_id: str, body: CypherRequest):
     return {"results": results, "neo4j_available": True}
 
 
-@router.get("/{ontology_id}/graph/neighbors/{node_id}")
+@router.get("/{ontology_id}/graph/neighbors/{node_id}", dependencies=[Depends(_require_read)])
 def get_neighbors(ontology_id: str, node_id: str, depth: int = 1):
     """查询节点邻居"""
     svc = get_neo4j()
     if not svc.available:
         return {"nodes": [], "edges": [], "neo4j_available": False}
     query = f"""
-    MATCH (n)-[r*1..{min(depth, 5)}]-(m)
+    MATCH path = (n)-[r*1..{min(depth, 5)}]-(m)
     WHERE elementId(n) = $node_id AND n.ontology_id = $ontology_id
+      AND all(node IN nodes(path) WHERE node.ontology_id = $ontology_id)
     RETURN n, r, m LIMIT 100
     """
     results = svc.run_cypher(query, {"node_id": node_id, "ontology_id": ontology_id})
@@ -203,7 +220,7 @@ class NLQueryRequest(BaseModel):
     schema: dict = {}
 
 
-@router.post("/{ontology_id}/graph/ask")
+@router.post("/{ontology_id}/graph/ask", dependencies=[Depends(_require_read)])
 def nl_query(ontology_id: str, body: NLQueryRequest):
     """自然语言 → Cypher → 图数据"""
     from app.services.v2.graph.nl2cypher import NL2CypherService
@@ -231,7 +248,7 @@ def nl_query(ontology_id: str, body: NLQueryRequest):
 
 # ── 高级图分析 ─────────────────────────────────────────────────────────
 
-@router.get("/{ontology_id}/graph/path")
+@router.get("/{ontology_id}/graph/path", dependencies=[Depends(_require_read)])
 def graph_path(ontology_id: str, src: str, tgt: str):
     """两节点间最短路径"""
     from app.services.v2.graph.graph_analytics import GraphAnalyticsService
@@ -239,7 +256,7 @@ def graph_path(ontology_id: str, src: str, tgt: str):
     return svc.shortest_path(ontology_id, src, tgt)
 
 
-@router.get("/{ontology_id}/graph/degree/{node_id}")
+@router.get("/{ontology_id}/graph/degree/{node_id}", dependencies=[Depends(_require_read)])
 def node_degree(ontology_id: str, node_id: str):
     """查询节点度数（入度 + 出度）"""
     from app.services.v2.graph.graph_analytics import GraphAnalyticsService
@@ -247,7 +264,7 @@ def node_degree(ontology_id: str, node_id: str):
     return svc.node_degree(ontology_id, node_id)
 
 
-@router.get("/{ontology_id}/graph/top-nodes")
+@router.get("/{ontology_id}/graph/top-nodes", dependencies=[Depends(_require_read)])
 def top_nodes(ontology_id: str, limit: int = 10):
     """返回连接数最多的 Top-N 节点"""
     from app.services.v2.graph.graph_analytics import GraphAnalyticsService
@@ -255,7 +272,7 @@ def top_nodes(ontology_id: str, limit: int = 10):
     return {"nodes": svc.top_connected_nodes(ontology_id, limit)}
 
 
-@router.post("/{ontology_id}/graph/sync")
+@router.post("/{ontology_id}/graph/sync", dependencies=[Depends(_require_edit)])
 def sync_graph(ontology_id: str, current_user: User = Depends(require_editor)):
     """将 SQLite 实体/关系全量同步到 Neo4j"""
     from app.database import SessionLocal

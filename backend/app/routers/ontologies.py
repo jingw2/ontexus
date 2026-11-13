@@ -11,20 +11,34 @@ from app.models.entity import Entity
 from app.models.relation import Relation
 from app.models.user import User
 from app.schemas.ontology import OntologyCreate, OntologyOut, OntologyListItem, OntologyUpdate
-from app.services.ontology_access import creator_grant
+from app.services.ontology_access import (
+    GrantDenied,
+    creator_grant,
+    discoverable_ontology_ids,
+    require_project_grant,
+)
 from app.services.publication.working_copy import OntologyWorkingCopyService
 import uuid
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _grant(db: Session, actor: User, ontology_id: str, capability: str) -> dict:
+    try:
+        return require_project_grant(db, actor, ontology_id, capability)
+    except GrantDenied as exc:
+        raise HTTPException(status_code=404, detail="ONTOLOGY_NOT_FOUND") from exc
+
 @router.get("")
 def list_ontologies(
     name: Optional[str] = None,
     page: int = 1, page_size: int = 20,
-    db: Session = Depends(get_db), _=Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
-    q = db.query(OntologyProject)
+    q = db.query(OntologyProject).filter(
+        OntologyProject.id.in_(discoverable_ontology_ids(db, current_user))
+    )
     if name:
         q = q.filter(OntologyProject.name.ilike(f"%{name}%"))
     total = q.count()
@@ -44,7 +58,8 @@ def create_ontology(body: OntologyCreate, db: Session = Depends(get_db), current
         raise HTTPException(status_code=409, detail={"error": "DUPLICATE_NAME", "message": f"Ontology 名称「{body.name}」已存在", "existing_id": existing.id})
     project = OntologyProject(id=str(uuid.uuid4()), name=body.name, domain=body.domain,
                                description=body.description, build_mode=body.build_mode or "simple_llm",
-                               created_by=current_user.id)
+                               created_by=current_user.id,
+                               security_domain_id=current_user.security_domain_id)
     db.add(project); db.flush()
     # atomically insert the exact creator grant (P1A-ACCESS contract)
     creator_grant(db, project.id, current_user)
@@ -52,17 +67,19 @@ def create_ontology(body: OntologyCreate, db: Session = Depends(get_db), current
     return {"data": OntologyOut.model_validate(project).model_dump()}
 
 @router.get("/{ontology_id}")
-def get_ontology(ontology_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_ontology(ontology_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _grant(db, current_user, ontology_id, "read")
     p = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not p:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, detail="ONTOLOGY_NOT_FOUND")
     return {"data": OntologyOut.model_validate(p).model_dump()}
 
 @router.put("/{ontology_id}")
 def update_ontology(ontology_id: str, body: OntologyUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_editor)):
+    _grant(db, current_user, ontology_id, "edit")
     p = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not p:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, detail="ONTOLOGY_NOT_FOUND")
     def _write():
         for k, v in body.model_dump(exclude_none=True).items():
             setattr(p, k, v)
@@ -71,10 +88,11 @@ def update_ontology(ontology_id: str, body: OntologyUpdate, db: Session = Depend
     return OntologyWorkingCopyService.mutate(db, ontology_id=ontology_id, actor_id=current_user.id, operation="ontology.update", callback=_write)
 
 @router.delete("/{ontology_id}", status_code=204)
-def delete_ontology(ontology_id: str, db: Session = Depends(get_db), _=Depends(require_admin)):
+def delete_ontology(ontology_id: str, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    _grant(db, current_user, ontology_id, "edit")
     p = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if not p:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, detail="ONTOLOGY_NOT_FOUND")
     bound_agent = db.execute(text(
         "SELECT 1 FROM agent_ontology_bindings WHERE ontology_id = :id LIMIT 1"
     ), {"id": ontology_id}).scalar_one_or_none()

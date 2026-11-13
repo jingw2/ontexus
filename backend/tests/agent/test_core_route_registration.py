@@ -475,6 +475,8 @@ def test_idempotency_migration_upgrade_downgrade_cycle():
 def test_audit_route_rejects_unknown_model_id_422(idem_schema):
     from app.routers.audit import router as audit_router
     from app.routers.audit import start_audit  # noqa: F401 — route-local fix surface
+    from app.models.user import User
+    from app.services.ontology_access import creator_grant
 
     session_factory = sessionmaker(bind=create_engine(_scoped_url(idem_schema)))
     session = session_factory()
@@ -491,6 +493,7 @@ def test_audit_route_rejects_unknown_model_id_422(idem_schema):
             "VALUES (:id, 'p', 'test', 'v0.1', 'created', :by, now(), now(), :domain, 1)"
         ), {"id": "onto-1", "by": admin_id, "domain": DEFAULT_DOMAIN})
         session.commit()
+        creator_grant(session, "onto-1", session.get(User, admin_id))
     finally:
         session.close()
 
