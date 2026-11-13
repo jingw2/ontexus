@@ -565,6 +565,7 @@
     "tools": {
       "available_later": "Available later",
       "bind": "Bind",
+      "blocked_hint": "Your account has no data grant (read schema, instances and relations) for: {{names}}. Ask an admin to grant data access.",
       "bound": "Bound",
       "capabilities": "Capabilities",
       "external": "External Tools",

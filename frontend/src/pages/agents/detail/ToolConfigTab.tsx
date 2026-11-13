@@ -147,7 +147,11 @@ export default function ToolConfigTab({ agentId, activeVersion, canEdit, onSaved
 
   // validate the proposed binding set whenever it changes
   useEffect(() => {
-    if (!canEdit || bindings.length === 0) return
+    if (!canEdit || bindings.length === 0) {
+      // drop a stale result so an old conflict banner doesn't outlive the binding
+      void Promise.resolve().then(() => setValidation(null))
+      return
+    }
     let cancelled = false
     agentToolsApi.validateAgentTools(agentId, { ontology_ids: bindings.map(b => b.ontology_id) })
       .then(result => { if (!cancelled) setValidation(result) })
@@ -243,7 +247,11 @@ export default function ToolConfigTab({ agentId, activeVersion, canEdit, onSaved
             : t('agent.tools.invalid', '绑定配置存在冲突')}
           </p>
           {validation.blocked && validation.blocked.length > 0 && (
-            <p className="text-xs mt-1">{validation.blocked.join(', ')}</p>
+            <p className="text-xs mt-1">
+              {t('agent.tools.blocked_hint', {
+                names: validation.blocked.map(id => ontologies.find(o => o.id === id)?.name ?? id).join(', '),
+              })}
+            </p>
           )}
           <button type="button" onClick={() => setDrawerOpen(true)}
             className="mt-2 px-3 py-1 text-xs border border-current rounded hover:opacity-80">

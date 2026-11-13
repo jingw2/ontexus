@@ -565,6 +565,7 @@
     "tools": {
       "available_later": "后续提供",
       "bind": "绑定",
+      "blocked_hint": "当前账号没有以下本体的数据授权（读取结构、实例和关系）：{{names}}。请联系管理员开通数据授权。",
       "bound": "已绑定",
       "capabilities": "能力",
       "external": "外部工具",
