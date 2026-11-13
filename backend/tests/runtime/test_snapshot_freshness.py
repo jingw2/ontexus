@@ -40,14 +40,9 @@ from app.services.runtime.service import ActionPlanRequest, RuntimeService
 from app.services.runtime.snapshots import get_snapshot, materialize_refresh_snapshot
 from app.services.v2.incremental.operations import get_last_successful_refresh_run
 
-# Captured once at import so every case in this module reasons about the
-# same instant: `test_fresh_snapshot_exposes_cursor_lag_and_lineage` needs
-# an exact lag match against a `compute_snapshot_freshness(..., now=FIXED_NOW)`
-# call, while `evaluate_fixture_runtime_freshness` exercises the real
-# `RuntimeService` (which reads real wall-clock time internally) moments
-# later in the same test process — negligible drift against this module's
-# hour/day-scale lag buckets.
-FIXED_NOW = datetime.now(timezone.utc)
+def _now() -> datetime:
+    """Capture wall-clock time per fixture/test, not once at module import."""
+    return datetime.now(timezone.utc)
 
 DOMAIN = "00000000-0000-0000-0000-0000000000f0"
 ONTOLOGY_ID = "ontology-freshness-001"
@@ -167,17 +162,18 @@ def _seed_completed_run(db, *, dataset_version_id: str, pipeline_run_id: str, re
     db.commit()
 
 
-def materialize_refresh_fixture(db, *, refresh_run_id: str):
+def materialize_refresh_fixture(db, *, refresh_run_id: str, now: datetime | None = None):
     """Seed one governed dataset/pipeline pair plus the named `RefreshRun`
     and materialize the snapshot it backs.
 
     `refresh_run_id` selects the case shape: a plain success id gets a
-    fresh cursor/lag anchored to `FIXED_NOW`; "soft-stale"/"hard-stale" get
+    fresh cursor/lag anchored to the supplied/current test time; "soft-stale"/"hard-stale" get
     a cursor whose lag already exceeds the shared default policy's
     soft/hard thresholds; "unknown-cursor" gets a successful run with no
     recorded cursor at all.
     """
     release = _ensure_release(db)
+    now = now or _now()
     dataset_version_id = f"dv-{refresh_run_id}"
     # "refresh-success-001" is this module's canonical fresh case, matching
     # the exact `pipeline_run_ids == ["pipeline-run-001"]` assertion below.
@@ -198,7 +194,7 @@ def materialize_refresh_fixture(db, *, refresh_run_id: str):
             )
         else:
             lag = _CASE_LAG_SECONDS[refresh_run_id]
-            observed_at = FIXED_NOW - timedelta(seconds=lag)
+            observed_at = now - timedelta(seconds=lag)
             run = RefreshRun(
                 id=refresh_run_id, source_id="source-freshness-001", resource="orders",
                 policy="batch", config_version=1, cursor_contract="watermark_primary_key",
@@ -296,9 +292,10 @@ get_approval = get_action_plan
 
 
 def test_fresh_snapshot_exposes_cursor_lag_and_lineage(db):
-    snapshot = materialize_refresh_fixture(db, refresh_run_id="refresh-success-001")
+    now = _now()
+    snapshot = materialize_refresh_fixture(db, refresh_run_id="refresh-success-001", now=now)
     view = compute_snapshot_freshness(
-        snapshot, now=FIXED_NOW, policy=FreshnessPolicy(max_lag_seconds=300, stale_action="deny"),
+        snapshot, now=now, policy=FreshnessPolicy(max_lag_seconds=300, stale_action="deny"),
     )
     assert view.state == "fresh"
     assert view.lag_seconds == 120
@@ -328,7 +325,7 @@ def test_unrelated_refresh_run_cannot_stamp_freshness_onto_unconnected_dataset_v
         idempotency_key="idem-refresh-unrelated-001",
         cursor_after_json={
             "watermark": None, "primary_key": "999", "opaque_value": None,
-            "observed_at": FIXED_NOW.isoformat(),
+            "observed_at": _now().isoformat(),
         },
         fencing_token=1, lag_seconds=5, pipeline_run_id="pr-unrelated-001",
     )
@@ -429,6 +426,7 @@ def test_investigate_succeeds_with_real_production_shaped_refresh_provenance(db,
     refresh_run_id = "refresh-provenance-shape-001"
     dataset_version_id = f"dv-{refresh_run_id}"
     pipeline_run_id = f"pr-{refresh_run_id}"
+    now = _now()
 
     # The exact dict shape production code builds — no source_type/locator/
     # content_hash key anywhere (see polling.py:630-638, event_ingest.py:668-678).
@@ -439,7 +437,7 @@ def test_investigate_succeeds_with_real_production_shaped_refresh_provenance(db,
         "config_version": 1,
         "cursor_contract": "watermark_primary_key",
         "cursor_outcome": "advanced",
-        "source_observed_at": (FIXED_NOW - timedelta(seconds=60)).isoformat(),
+        "source_observed_at": (now - timedelta(seconds=60)).isoformat(),
     }
 
     pipeline = Pipeline(id=f"pipeline-{pipeline_run_id}", name=pipeline_run_id, spec={})
@@ -468,7 +466,7 @@ def test_investigate_succeeds_with_real_production_shaped_refresh_provenance(db,
         idempotency_key=f"idem-{refresh_run_id}",
         cursor_after_json={
             "watermark": None, "primary_key": "100", "opaque_value": None,
-            "observed_at": (FIXED_NOW - timedelta(seconds=60)).isoformat(),
+            "observed_at": (now - timedelta(seconds=60)).isoformat(),
         },
         fencing_token=1, lag_seconds=60, pipeline_run_id=pipeline_run_id,
         source_provenance=dict(provenance),
