@@ -30,8 +30,12 @@ function cursorLabel(cursor: Record<string, unknown> | null | undefined): string
  * never a distinct error state and never rollback language.
  */
 export default function RefreshOperationsPage() {
-  const { t } = useTranslation()
   const { sourceId } = useParams<{ sourceId: string }>()
+  return <RefreshOperationsContent key={sourceId} sourceId={sourceId} />
+}
+
+function RefreshOperationsContent({ sourceId }: { sourceId?: string }) {
+  const { t } = useTranslation()
   const [status, setStatus] = useState<RefreshStatus | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -44,11 +48,12 @@ export default function RefreshOperationsPage() {
 
   const load = useCallback(() => {
     if (!sourceId) return
-    setError('')
-    refreshApi.getStatus(sourceId).then(setStatus).catch(() => setError(t('runtime.refresh.load_failed', 'Failed to load refresh status')))
+    refreshApi.getStatus(sourceId)
+      .then(value => { setStatus(value); setError('') })
+      .catch(() => setError(t('runtime.refresh.load_failed', 'Failed to load refresh status')))
   }, [sourceId, t])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   useEffect(() => {
     if (!sourceId) return

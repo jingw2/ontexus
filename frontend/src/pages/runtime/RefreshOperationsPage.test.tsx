@@ -1,7 +1,8 @@
 import '@/i18n'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import { refreshApi } from '@/api/refresh'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -56,6 +57,25 @@ function baseStatus(run: RefreshRunView, overrides: Partial<RefreshStatus> = {})
 }
 
 describe('RefreshOperationsPage', () => {
+  it('does not expose a prior source run after a delayed response', async () => {
+    let resolveOld!: (value: RefreshStatus) => void
+    const oldResponse = new Promise<RefreshStatus>(resolve => { resolveOld = resolve })
+    const get = vi.spyOn(refreshApi, 'getStatus').mockImplementation(id => id === 'old' ? oldResponse :
+      Promise.resolve(baseStatus(baseRun({ run_id: 'current-run' }), { source_id: id })))
+    const schedule = vi.spyOn(refreshApi, 'getSchedule').mockRejectedValue(new Error('not configured'))
+    try {
+      render(<MemoryRouter initialEntries={['/refresh/old']}>
+        <Link to="/refresh/new">next source</Link>
+        <Routes><Route path="/refresh/:sourceId" element={<RefreshOperationsPage />} /></Routes>
+      </MemoryRouter>)
+      await userEvent.click(screen.getByText('next source'))
+      expect(await screen.findByText('current-run')).toBeTruthy()
+      await act(async () => { resolveOld(baseStatus(baseRun({ run_id: 'old-run' }))); await oldResponse })
+      expect(screen.getByText('current-run')).toBeTruthy()
+      expect(screen.queryByText('old-run')).toBeNull()
+    } finally { get.mockRestore(); schedule.mockRestore() }
+  })
+
   it('loads the persisted schedule timezone and business calendar on mount', async () => {
     server.use(
       http.get('*/api/v2/refresh/sources/source-001/status', () => HttpResponse.json(baseStatus(baseRun({})))),

@@ -1,7 +1,8 @@
 import '@/i18n'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { act, render, screen } from '@testing-library/react'
+import { runtimeApi } from '@/api/runtime'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -65,6 +66,24 @@ const ROLLBACK_PLAN = {
 }
 
 describe('ReconciliationPage', () => {
+  it('does not show a late case response after navigating to another case', async () => {
+    let resolveOld!: (value: typeof UNKNOWN_CASE) => void
+    const oldResponse = new Promise<typeof UNKNOWN_CASE>(resolve => { resolveOld = resolve })
+    const get = vi.spyOn(runtimeApi, 'getReconciliation').mockImplementation(id =>
+      id === 'recon-001' ? oldResponse : Promise.resolve({ ...UNKNOWN_CASE, id, execution_id: 'exec-002' }))
+    try {
+      render(<MemoryRouter initialEntries={['/cases/recon-001']}>
+        <Link to="/cases/recon-002">next case</Link>
+        <Routes><Route path="/cases/:reconciliationId" element={<ReconciliationPage />} /></Routes>
+      </MemoryRouter>)
+      await userEvent.click(screen.getByText('next case'))
+      expect(await screen.findByText('exec-002')).toBeTruthy()
+      await act(async () => { resolveOld(UNKNOWN_CASE); await oldResponse })
+      expect(screen.getByText('exec-002')).toBeTruthy()
+      expect(screen.queryByText('exec-001')).toBeNull()
+    } finally { get.mockRestore() }
+  })
+
   it('renders an UNKNOWN case with its unknown reason and next action', async () => {
     server.use(
       http.get('*/api/v2/runtime/reconciliations/recon-001', () => HttpResponse.json(UNKNOWN_CASE)),

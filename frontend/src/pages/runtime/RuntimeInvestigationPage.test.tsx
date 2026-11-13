@@ -1,7 +1,8 @@
 import '@/i18n'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { runtimeApi } from '@/api/runtime'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -26,6 +27,23 @@ function renderPage() {
 }
 
 describe('RuntimeInvestigationPage', () => {
+  it('ignores an auto-run result after the operator changes its inputs', async () => {
+    type Result = Awaited<ReturnType<typeof runtimeApi.investigate>>
+    let finish!: (value: Result) => void
+    const pending = new Promise<Result>(resolve => { finish = resolve })
+    const investigate = vi.spyOn(runtimeApi, 'investigate').mockReturnValue(pending)
+    try {
+      renderPage()
+      fireEvent.change(screen.getByTestId('investigate-snapshot-id'), { target: { value: 'new-snapshot' } })
+      await act(async () => {
+        finish({ decision: 'ALLOW', reason_code: 'ALLOW', result: [], evidence_citations: [], rule_outcome: [] } as unknown as Result)
+        await pending
+      })
+      expect(screen.queryByTestId('investigation-result')).toBeNull()
+      expect(screen.getByTestId('run-investigation')).not.toBeDisabled()
+    } finally { investigate.mockRestore() }
+  })
+
   it('shows snapshot evidence and an ALLOW decision', async () => {
     server.use(
       http.post('*/api/v2/runtime/investigate', () =>
