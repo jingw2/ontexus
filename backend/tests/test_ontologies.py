@@ -79,6 +79,15 @@ def test_get_ontology(client, auth_headers):
     assert r2.status_code == 200
     assert r2.json()["data"]["name"] == "GetTest"
 
+def test_get_ontology_exposes_is_dirty(client, auth_headers, db):
+    from app.models.ontology import OntologyProject
+    r = client.post("/api/v1/ontologies", json={"name": "DirtyTest", "domain": "财务"}, headers=auth_headers)
+    oid = r.json()["data"]["id"]
+    assert client.get(f"/api/v1/ontologies/{oid}", headers=auth_headers).json()["data"]["is_dirty"] is False
+    db.query(OntologyProject).filter(OntologyProject.id == oid).update({"is_dirty": True})
+    db.commit()
+    assert client.get(f"/api/v1/ontologies/{oid}", headers=auth_headers).json()["data"]["is_dirty"] is True
+
 def test_delete_ontology(client, auth_headers):
     r = client.post("/api/v1/ontologies", json={"name": "Del", "domain": "财务"}, headers=auth_headers)
     oid = r.json()["data"]["id"]

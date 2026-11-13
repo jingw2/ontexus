@@ -1,6 +1,6 @@
-import React, { useState, lazy, Suspense } from 'react'
+import React, { useState, useEffect, lazy, Suspense } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { ontologyApi } from '@/api/ontologies'
 import StatusBadge from '@/components/StatusBadge'
@@ -63,6 +63,13 @@ export default function OntologyDetailPage() {
   const qc = useQueryClient()
   const [localStatus, setLocalStatus] = useState<string | null>(null)
 
+  // tab edits mark the working copy dirty server-side — refetch the ontology
+  // once they settle so the "publish new version" button can appear
+  const mutating = useIsMutating()
+  useEffect(() => {
+    if (mutating === 0) qc.invalidateQueries({ queryKey: ['ontology', id] })
+  }, [mutating, qc, id])
+
   if (isLoading) return <div className="p-6 text-gray-400">{t('common.loading')}</div>
   if (!ontology) return <div className="p-6 text-red-500">Ontology not found</div>
 
@@ -79,6 +86,7 @@ export default function OntologyDetailPage() {
   const invalidateList = () => {
     qc.invalidateQueries({ queryKey: ['ontologies'] })
     qc.invalidateQueries({ queryKey: ['stats'] })
+    qc.invalidateQueries({ queryKey: ['ontology', id] })
   }
 
   const isPipelineMode = ontology.build_mode === 'pipeline_mapping'
@@ -105,7 +113,7 @@ export default function OntologyDetailPage() {
       </div>
 
       <div className="mb-6">
-        <OntologyPublicationPanel ontologyId={id!} status={status}
+        <OntologyPublicationPanel ontologyId={id!} status={status} isDirty={!!ontology.is_dirty}
           onStatusChange={handleStatusChange} onMutated={invalidateList} />
       </div>
 

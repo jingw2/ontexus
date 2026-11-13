@@ -17,6 +17,7 @@ export interface OntologyListItem {
 export interface OntologyDetail extends OntologyListItem {
   description?: string
   build_mode?: string
+  is_dirty?: boolean
   created_at: string
 }
 

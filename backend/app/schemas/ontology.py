@@ -33,6 +33,7 @@ class OntologyOut(BaseModel):
     version: str
     status: str
     build_mode: Optional[str] = "simple_llm"
+    is_dirty: bool = False
     created_by: str
     created_at: datetime
     updated_at: datetime
