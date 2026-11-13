@@ -14617,6 +14617,119 @@
         ]
       }
     },
+    "/api/v2/connections/{connection_id}/resources": {
+      "get": {
+        "description": "List tables/collections exposed by a saved connection.",
+        "operationId": "list_connection_resources_api_v2_connections__connection_id__resources_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Connection Resources",
+        "tags": [
+          "v2-connections"
+        ]
+      }
+    },
+    "/api/v2/connections/{connection_id}/resources/{resource}/sample": {
+      "get": {
+        "description": "Read a bounded sample from one saved connection resource.",
+        "operationId": "sample_connection_resource_api_v2_connections__connection_id__resources__resource__sample_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "title": "Resource",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Sample Connection Resource",
+        "tags": [
+          "v2-connections"
+        ]
+      }
+    },
     "/api/v2/connections/{connection_id}/schedule": {
       "post": {
         "description": "Compatibility delegate for the typed refresh schedule operation.",

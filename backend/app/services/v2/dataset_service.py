@@ -110,11 +110,11 @@ class DatasetService:
         self,
         dataset_id: str,
         version_no: int,
-        limit: int = 100,
+        limit: int | None = 100,
         *,
         version_id: str | None = None,
     ) -> list[dict]:
-        """CSV/JSON 数据预览。无需 DuckDB, 纯 Python 处理。"""
+        """CSV/JSON 数据预览。``limit=None`` 返回完整版本。"""
         query = self._db.query(DatasetVersion).filter(DatasetVersion.dataset_id == dataset_id)
         if version_id is not None:
             query = query.filter(DatasetVersion.id == version_id)
@@ -156,7 +156,7 @@ class DatasetService:
                                 if i < len(headers):
                                     row_dict[headers[i]] = val if val is not None else ""
                             rows_list.append(row_dict)
-                            if len(rows_list) >= limit:
+                            if limit is not None and len(rows_list) >= limit:
                                 break
                     wb.close()
                     return rows_list
@@ -168,7 +168,7 @@ class DatasetService:
             reader = csv.DictReader(io.StringIO(text))
             rows = []
             for i, row in enumerate(reader):
-                if i >= limit:
+                if limit is not None and i >= limit:
                     break
                 rows.append(dict(row))
             return rows

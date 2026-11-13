@@ -24,9 +24,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import func, select
 
+from app.models.v2.connection import Connection
 from app.models.v2.refresh import RefreshRun, RefreshSchedule
 from app.services.v2.scheduler.schedule_service import (
-    DEFAULT_RESOURCE,
     ScheduleRequest,
     dispatch_due_schedules,
     upsert_refresh_schedule,
@@ -51,6 +51,12 @@ def upsert_fixture_schedule(db, *, cron_expr, timezone, business_calendar, sla_s
 def create_fixture_schedule(db, *, target_id, max_pending_runs=5, cron_expr="* * * * *", retry_policy=None) -> RefreshSchedule:
     """A schedule already due at FIXED_NOW (every-minute cron, upserted one
     minute before FIXED_NOW so next_due_at lands exactly on it)."""
+    if db.get(Connection, target_id) is None:
+        db.add(Connection(
+            id=target_id, name=target_id, kind="rest", config={"resource": "orders"},
+            status="active", refresh_policy="batch", cursor_contract="watermark_primary_key",
+        ))
+        db.commit()
     request = ScheduleRequest(
         target_type="connection", target_id=target_id, cron_expr=cron_expr, timezone="UTC",
         business_calendar=[], sla_seconds=0, retry_policy=retry_policy, backfill_window_seconds=0,
@@ -59,7 +65,7 @@ def create_fixture_schedule(db, *, target_id, max_pending_runs=5, cron_expr="* *
     return upsert_refresh_schedule(db, request, now=FIXED_NOW - timedelta(minutes=1))
 
 
-def create_queued_fixture_run(db, *, source_id, resource=DEFAULT_RESOURCE) -> RefreshRun:
+def create_queued_fixture_run(db, *, source_id, resource="orders") -> RefreshRun:
     """A pre-existing active run occupying the source's admission slot,
     independent of any schedule dispatch."""
     run = RefreshRun(
@@ -123,6 +129,12 @@ def test_scheduled_run_persists_destination_queue_for_operability(db):
 def test_manual_refresh_run_persists_destination_queue_for_operability(db):
     from app.tasks.v2.refresh_tasks import create_manual_connection_run
 
+    db.add(Connection(
+        id="source-manual-queue-attribution", name="manual source", kind="rest",
+        config={"resource": "orders"}, status="active", refresh_policy="batch",
+        cursor_contract="watermark_primary_key",
+    ))
+    db.commit()
     run = create_manual_connection_run(db, "source-manual-queue-attribution")
     assert run.dispatch_queue == "refresh.poll"
 
@@ -287,7 +299,7 @@ def test_expired_dispatch_claim_is_recovered_once_without_duplicate(db):
     schedule = create_fixture_schedule(db, target_id="source-expired-claim")
     occurrence_key = f"schedule:{schedule.id}:{schedule.next_due_at.isoformat()}"
     retained = RefreshRun(
-        id=str(uuid.uuid4()), source_id="source-expired-claim", resource=DEFAULT_RESOURCE,
+        id=str(uuid.uuid4()), source_id="source-expired-claim", resource="orders",
         policy="batch", trigger="scheduled", config_version=1,
         cursor_contract="watermark_primary_key", status="queued", dispatch_state="pending",
         dispatch_queue="refresh.poll", dispatch_claim_owner="abandoned-beat",

@@ -1308,7 +1308,15 @@
     "test_failed": "失败",
     "test_testing": "测试中...",
     "test_connection": "测试连接",
-    "sync_mode_label": "同步模式"
+    "sync_mode_label": "同步模式",
+    "saved_connection_label": "已保存连接",
+    "source_table_label": "源数据表",
+    "select_connection": "选择已保存的连接",
+    "select_table": "选择数据表",
+    "loading_connections": "正在加载连接...",
+    "loading_resources": "正在加载数据表...",
+    "no_saved_connections": "请先在数据连接中创建数据库连接",
+    "resources_failed": "无法发现数据表"
   },
   "outputInspector": {
     "output_type_label": "输出类型",
@@ -1413,7 +1421,16 @@
     "drop_release": "松开以添加文件",
     "drop_hint": "拖拽文件到此处，或",
     "drop_hint_click": "点击选择",
-    "drop_formats_hint": "支持 CSV、XLSX、JSON、PDF、DOCX 等格式，可多选"
+    "drop_formats_hint": "支持 CSV、XLSX、JSON、PDF、DOCX 等格式，可多选",
+    "test_connection": "测试连接",
+    "testing": "测试中...",
+    "test_success": "连接成功",
+    "test_failed": "连接失败",
+    "discover_tables": "发现数据表",
+    "hide_tables": "收起数据表",
+    "no_tables": "未发现数据表",
+    "resources_failed": "无法发现数据表",
+    "pipeline_sync_hint": "请在 Pipeline Builder 中选择数据表并运行"
   },
   "curatedReview": {
     "notes_ph": "审核备注（可选）",

@@ -1308,7 +1308,15 @@
     "test_failed": "Failed",
     "test_testing": "Testing...",
     "test_connection": "Test Connection",
-    "sync_mode_label": "Sync Mode"
+    "sync_mode_label": "Sync Mode",
+    "saved_connection_label": "Saved Connection",
+    "source_table_label": "Source Table",
+    "select_connection": "Select a saved connection",
+    "select_table": "Select a table",
+    "loading_connections": "Loading connections...",
+    "loading_resources": "Loading tables...",
+    "no_saved_connections": "Create a database connection in Data Connections first",
+    "resources_failed": "Could not discover tables"
   },
   "outputInspector": {
     "output_type_label": "Output Type",
@@ -1413,7 +1421,16 @@
     "drop_release": "Release to add files",
     "drop_hint": "Drag files here, or",
     "drop_hint_click": "click to select",
-    "drop_formats_hint": "Supports CSV, XLSX, JSON, PDF, DOCX and more, multiple selection allowed"
+    "drop_formats_hint": "Supports CSV, XLSX, JSON, PDF, DOCX and more, multiple selection allowed",
+    "test_connection": "Test Connection",
+    "testing": "Testing...",
+    "test_success": "Connection succeeded",
+    "test_failed": "Connection failed",
+    "discover_tables": "Discover Tables",
+    "hide_tables": "Hide Tables",
+    "no_tables": "No tables found",
+    "resources_failed": "Could not discover tables",
+    "pipeline_sync_hint": "Run a selected table from Pipeline Builder"
   },
   "curatedReview": {
     "notes_ph": "Review notes (optional)",

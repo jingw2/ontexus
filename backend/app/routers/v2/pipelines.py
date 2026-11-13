@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
+import copy
 from datetime import datetime, timezone
 from app.database import SessionLocal
 from app.deps import get_current_user, require_admin, require_editor
@@ -20,6 +21,80 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+_SQL_SOURCE_TYPES = {"mysql", "postgres", "postgresql"}
+_UNSUPPORTED_INLINE_SOURCE_TYPES = {"mongo", "mongodb", "rest", "rest_api"}
+_UNSUPPORTED_INLINE_CONNECTOR_CODE = "UNSUPPORTED_INLINE_CONNECTOR"
+
+
+def _unsupported_inline_connector_nodes(definition: Optional[dict]) -> list[tuple[str, str]]:
+    if not isinstance(definition, dict):
+        return []
+    nodes = definition.get("nodes", [])
+    if not isinstance(nodes, list):
+        return []
+    unsupported = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "connector":
+            continue
+        config = node.get("config")
+        if not isinstance(config, dict):
+            continue
+        source_type = str(config.get("source_type", "")).strip().lower()
+        if source_type in _UNSUPPORTED_INLINE_SOURCE_TYPES:
+            unsupported.append((str(node.get("id", "")), source_type))
+    return unsupported
+
+
+def _reject_unsupported_inline_connectors(definition: Optional[dict]) -> None:
+    if _unsupported_inline_connector_nodes(definition):
+        raise HTTPException(status_code=422, detail=_UNSUPPORTED_INLINE_CONNECTOR_CODE)
+
+
+def _sanitize_definition(definition: Optional[dict]) -> Optional[dict]:
+    """Keep only saved-connection references for SQL connector nodes.
+
+    Credentials come from a saved Connection at run time. Legacy inline
+    values are not needed by the worker and must never be persisted again.
+    """
+    if definition is None:
+        return None
+    sanitized = copy.deepcopy(definition)
+    nodes = sanitized.get("nodes", []) if isinstance(sanitized, dict) else []
+    if not isinstance(nodes, list):
+        return sanitized
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "connector":
+            continue
+        config = node.get("config")
+        if not isinstance(config, dict):
+            continue
+        source_type = str(config.get("source_type", "")).lower()
+        if source_type not in _SQL_SOURCE_TYPES:
+            continue
+        node["config"] = {
+            key: value for key, value in config.items()
+            if key in {"source_type", "connection_id", "resource", "table", "sync_mode"}
+        }
+    return sanitized
+
+
+def _public_definition(definition: Optional[dict]) -> Optional[dict]:
+    """Hide credentials in legacy definitions without mutating stored rows."""
+    sanitized = _sanitize_definition(definition)
+    if not isinstance(sanitized, dict):
+        return sanitized
+    for node in sanitized.get("nodes", []):
+        if not isinstance(node, dict) or node.get("type") != "connector":
+            continue
+        config = node.get("config")
+        if not isinstance(config, dict):
+            continue
+        source_type = str(config.get("source_type", "")).strip().lower()
+        if source_type in _UNSUPPORTED_INLINE_SOURCE_TYPES:
+            node["config"] = {"source_type": source_type}
+    return sanitized
 
 
 # ── Pydantic Models ────────────────────────────────────────────────
@@ -76,6 +151,7 @@ class ValidateResult(BaseModel):
 @router.post("", response_model=PipelineResponse, status_code=201, dependencies=[Depends(require_editor)])
 def create_pipeline(body: PipelineCreate, db: Session = Depends(get_db)):
     """创建新 Pipeline。支持旧 steps 格式和新 nodes/edges DSL。"""
+    _reject_unsupported_inline_connectors(body.definition)
     # 重名校验
     existing = db.query(Pipeline).filter(
         Pipeline.name == body.name,
@@ -100,7 +176,7 @@ def create_pipeline(body: PipelineCreate, db: Session = Depends(get_db)):
         source_dataset_id=body.source_dataset_id,
         route=inferred_route or "A",  # SQLite 该列有 NOT NULL 约束
         spec=body.spec or {},
-        definition=body.definition,
+        definition=_sanitize_definition(body.definition),
         status="draft",
         branch="main",
         version=1,
@@ -159,8 +235,11 @@ def update_pipeline(pipeline_id: str, body: PipelineUpdate, db: Session = Depend
     if not pl:
         raise HTTPException(404, "Pipeline not found")
 
+    _reject_unsupported_inline_connectors(body.definition)
     update_data = body.model_dump(exclude_unset=True)
     for k, v in update_data.items():
+        if k == "definition":
+            v = _sanitize_definition(v)
         setattr(pl, k, v)
     pl.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -200,6 +279,14 @@ def validate_pipeline(pipeline_id: str, db: Session = Depends(get_db), _=Depends
 
     nodes = definition.get("nodes", [])
     edges = definition.get("edges", [])
+
+    for node_id, source_type in _unsupported_inline_connector_nodes(definition):
+        errors.append({
+            "node_id": node_id,
+            "severity": "error",
+            "code": _UNSUPPORTED_INLINE_CONNECTOR_CODE,
+            "message": "MongoDB/REST inline connector nodes are unsupported in Builder; use File Upload in Builder and manage external connections in Data Connections.",
+        })
 
     if not nodes:
         errors.append({"node_id": "", "severity": "error", "message": "Pipeline 至少需要一个节点。"})
@@ -320,6 +407,7 @@ def run_pipeline(pipeline_id: str, db: Session = Depends(get_db), _=Depends(requ
     pl = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
     if not pl:
         raise HTTPException(404, "Pipeline not found")
+    _reject_unsupported_inline_connectors(pl.definition)
 
     pl.status = "running"
     run = PipelineRun(pipeline_id=pipeline_id, status="pending", started_at=datetime.now(timezone.utc))
@@ -453,7 +541,7 @@ def _format_pipeline(pl: Pipeline) -> dict:
         "source_dataset_id": pl.source_dataset_id,
         "route": pl.route,
         "spec": pl.spec or {},
-        "definition": pl.definition,
+        "definition": _public_definition(pl.definition),
         "status": pl.status or "draft",
         "branch": pl.branch or "main",
         "version": pl.version or 1,

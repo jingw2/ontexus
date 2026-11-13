@@ -47,9 +47,8 @@ def test_schedule_connection_without_db_only_validates_never_reports_active():
 
 def test_schedule_pipeline_without_db_only_validates_never_reports_active():
     svc = CronService()
-    result = svc.schedule_pipeline_run("pl-1", "*/30 * * * *")
-    assert result["status"] != "scheduled"
-    assert result["pipeline_id"] == "pl-1"
+    with pytest.raises(ValueError, match="PIPELINE_SCHEDULE_UNSUPPORTED"):
+        svc.schedule_pipeline_run("pl-1", "*/30 * * * *")
 
 
 def test_schedule_connection_with_db_persists_and_returns_scheduled(db):
@@ -69,10 +68,13 @@ def test_schedule_connection_with_db_persists_and_returns_scheduled(db):
 
 def test_schedule_pipeline_with_db_persists_and_returns_scheduled(db):
     svc = CronService()
-    result = svc.schedule_pipeline_run("pl-1", "*/30 * * * *", db=db)
-    assert result["status"] == "scheduled"
-    assert result["pipeline_id"] == "pl-1"
-    assert result["next_due_at"] is not None
+    with pytest.raises(ValueError, match="PIPELINE_SCHEDULE_UNSUPPORTED"):
+        svc.schedule_pipeline_run("pl-1", "*/30 * * * *", db=db)
+
+    from app.models.v2.refresh import RefreshSchedule
+    assert db.query(RefreshSchedule).filter(
+        RefreshSchedule.target_type == "pipeline", RefreshSchedule.target_id == "pl-1",
+    ).count() == 0
 
 
 def test_describe_cron_every_minute():
@@ -137,11 +139,11 @@ def scheduler_connection(db):
 
     db.add(Connection(
         id="scheduler-conn-001", name="scheduler-source", kind="rest", status="active",
-        config={"cursor_contract": "watermark_primary_key"},
+        config={"cursor_contract": "watermark_primary_key", "resource": "orders"},
         refresh_policy="micro_batch", cursor_contract="watermark_primary_key",
     ))
     db.add(RefreshSourceState(
-        id="scheduler-state-001", source_id="scheduler-conn-001", resource="__scheduled__",
+        id="scheduler-state-001", source_id="scheduler-conn-001", resource="orders",
         cursor_contract="watermark_primary_key", config_version=1,
         cursor_json={
             "watermark": NOW.isoformat(), "primary_key": "1", "opaque_value": None,
