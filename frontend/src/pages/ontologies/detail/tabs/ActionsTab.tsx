@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { ontologyApi } from '@/api/ontologies'
 import { apiClient } from '@/api/client'
 import ConfirmDialog from '@/components/ConfirmDialog'
-import { Pencil, Trash2, Plus, ToggleLeft, ToggleRight, CheckCircle, Loader2 } from 'lucide-react'
+import { Pencil, Trash2, Plus, ToggleLeft, ToggleRight } from 'lucide-react'
 import type { Action } from '@/types/ontology'
 
 type ActionRow = Action
@@ -36,20 +36,11 @@ export default function ActionsTab({ ontologyId }: { ontologyId: string }) {
     mutationFn: (id: string) => apiClient.post(`/ontologies/${ontologyId}/actions/${id}/toggle`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['actions', ontologyId] }),
   })
-  const publishMut = useMutation({
-    mutationFn: () => apiClient.post(`/ontologies/${ontologyId}/actions/publish`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['actions', ontologyId] }),
-  })
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <div className="flex-1" />
-        <button onClick={() => publishMut.mutate()} disabled={publishMut.isPending}
-          className="flex items-center gap-1.5 px-3 py-2 bg-green-700 text-white rounded-lg text-sm disabled:opacity-50">
-          {publishMut.isPending ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
-          {t('actions.publish_all')}
-        </button>
         <button onClick={() => { setShowCreate(true); reset() }}
           className="flex items-center gap-2 px-3 py-2 bg-black text-white rounded-lg text-sm">
           <Plus size={14} /> {t('actions.add')}
