@@ -2,6 +2,7 @@
 import io
 
 import pytest
+from fastapi import HTTPException
 
 from app.config import settings
 
@@ -43,6 +44,36 @@ def test_upload_rejects_oversized_file(datasets_client, admin_user, monkeypatch)
         headers=_headers(datasets_client),
     )
     assert r.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_bounded_upload_read_stops_after_limit_plus_one_byte(monkeypatch):
+    from app.routers.v2.datasets import _read_upload_bounded
+
+    limit = 8
+    payload = b"x" * (limit + 1000)
+
+    class TrackedUpload:
+        def __init__(self, value):
+            self.value = value
+            self.offset = 0
+            self.read_sizes = []
+
+        async def read(self, size=-1):
+            self.read_sizes.append(size)
+            end = min(self.offset + size, len(self.value))
+            chunk = self.value[self.offset:end]
+            self.offset = end
+            return chunk
+
+    upload = TrackedUpload(payload)
+
+    with pytest.raises(HTTPException) as error:
+        await _read_upload_bounded(upload, limit, chunk_size=4)
+
+    assert error.value.status_code == 413
+    assert upload.offset == limit + 1
+    assert upload.read_sizes == [4, 4, 1]
 
 
 def test_upload_accepts_normal_csv(datasets_client, admin_user):

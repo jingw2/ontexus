@@ -23,6 +23,30 @@ class DatasetResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+
+
+async def _read_upload_bounded(
+    file: UploadFile,
+    max_bytes: int,
+    *,
+    chunk_size: int = _UPLOAD_READ_CHUNK_SIZE,
+    error_detail: str | None = None,
+) -> bytes:
+    """Read at most one byte beyond the configured upload limit."""
+    content = bytearray()
+    while len(content) <= max_bytes:
+        read_size = min(chunk_size, max_bytes - len(content) + 1)
+        chunk = await file.read(read_size)
+        if not chunk:
+            break
+        if len(content) + len(chunk) > max_bytes:
+            raise HTTPException(status_code=413, detail=error_detail or "文件超过大小限制")
+        content.extend(chunk)
+    return bytes(content)
+
+
 @router.post("/upload", status_code=201)
 async def upload_dataset(file: UploadFile = File(...), db: Session = Depends(get_db), _=Depends(require_editor)):
     """上传 CSV/Excel 文件，自动创建 raw Dataset + DatasetVersion"""
@@ -35,9 +59,12 @@ async def upload_dataset(file: UploadFile = File(...), db: Session = Depends(get
     if ext not in allowed:
         raise HTTPException(400, f"不支持的文件类型: .{ext} (允许: {settings.allowed_upload_extensions})")
 
-    content = await file.read()
-    if len(content) > settings.max_upload_mb * 1024 * 1024:
-        raise HTTPException(413, f"文件超过大小限制 {settings.max_upload_mb}MB")
+    max_upload_bytes = settings.max_upload_mb * 1024 * 1024
+    content = await _read_upload_bounded(
+        file,
+        max_upload_bytes,
+        error_detail=f"文件超过大小限制 {settings.max_upload_mb}MB",
+    )
     # 推断 kind
     if ext in ("csv", "xlsx", "xls"):
         kind = "structured"
