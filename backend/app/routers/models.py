@@ -39,6 +39,7 @@ from app.services.model_version import (
     remediate_blocked_identity,
     rotate_credential,
     select_active_version,
+    versioning_schema_present,
 )
 
 router = APIRouter()
@@ -344,8 +345,10 @@ def delete_model(model_id: str, db: Session = Depends(get_db), _=Depends(require
     # RESTRICT-reference model_configs.id, so they must be cleared first —
     # and model_configs.active_version_id RESTRICT-references the version
     # row itself (the reverse direction), so that pointer must be nulled
-    # before the version row can go.
-    db.execute(text("UPDATE model_configs SET active_version_id = NULL WHERE id = :id"), {"id": model_id})
+    # before the version row can go. The pointer is migration-only; the
+    # legacy metadata.create_all schema has no such column.
+    if versioning_schema_present(db):
+        db.execute(text("UPDATE model_configs SET active_version_id = NULL WHERE id = :id"), {"id": model_id})
     db.execute(text("DELETE FROM model_credentials WHERE model_config_id = :id"), {"id": model_id})
     db.execute(text("DELETE FROM model_migration_findings WHERE model_config_id = :id"), {"id": model_id})
     db.execute(text("DELETE FROM model_config_versions WHERE model_config_id = :id"), {"id": model_id})
