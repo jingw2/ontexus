@@ -35,8 +35,19 @@ branch_labels = None
 depends_on = None
 
 
+# PostgreSQL spellings, with MySQL equivalents for runtime databases there.
+_PG = {"obj": "json_build_object", "empty_obj": "'{}'::json", "empty_arr": "'[]'::json"}
+_MYSQL = {"obj": "JSON_OBJECT", "empty_obj": "JSON_OBJECT()", "empty_arr": "JSON_ARRAY()"}
+
+
 def upgrade() -> None:
-    op.execute("""
+    mysql = op.get_bind().dialect.name == "mysql"
+    sql = _MYSQL if mysql else _PG
+
+    def text(col: str) -> str:
+        return f"CAST({col} AS CHAR)" if mysql else f"{col}::text"
+
+    op.execute(f"""
         INSERT INTO v2_ontology_logic_rules
             (id, ontology_id, name, logic_type, description, expression,
              severity, enabled, status, version, created_at, updated_at)
@@ -45,8 +56,8 @@ def upgrade() -> None:
             COALESCE(NULLIF(lr.function_type, ''), 'validation'),
             lr.description,
             CASE WHEN lr.definition IS NOT NULL AND lr.definition <> ''
-                 THEN json_build_object('definition', lr.definition)
-                 ELSE '{}'::json END,
+                 THEN {sql['obj']}('definition', lr.definition)
+                 ELSE {sql['empty_obj']} END,
             'info', lr.enabled, COALESCE(NULLIF(lr.status, ''), 'draft'),
             1, lr.created_at, lr.updated_at
         FROM logic_rules lr
@@ -56,21 +67,21 @@ def upgrade() -> None:
                OR (v2.ontology_id = lr.ontology_id AND v2.name = lr.name_cn)
         )
     """)
-    op.execute("""
+    op.execute(f"""
         INSERT INTO v2_ontology_action_types
             (id, ontology_id, name, description, action_category, parameters,
              submission_criteria, effects, side_effects, permission_rules,
              enabled, status, version, created_at, updated_at)
         SELECT
             a.id, a.ontology_id, a.name_cn, a.description, 'custom',
-            COALESCE(a.parameters, '[]'::json),
-            CASE WHEN a.submission_criteria IS NOT NULL AND a.submission_criteria::text <> '[]'
-                 THEN json_build_object('items', a.submission_criteria) ELSE NULL END,
-            COALESCE(a.side_effects, '[]'::json),
-            CASE WHEN a.side_effects IS NOT NULL AND a.side_effects::text <> '[]'
-                 THEN json_build_object('items', a.side_effects) ELSE NULL END,
-            CASE WHEN a.rules IS NOT NULL AND a.rules::text <> '[]'
-                 THEN json_build_object('rules', a.rules) ELSE NULL END,
+            COALESCE(a.parameters, {sql['empty_arr']}),
+            CASE WHEN a.submission_criteria IS NOT NULL AND {text('a.submission_criteria')} <> '[]'
+                 THEN {sql['obj']}('items', a.submission_criteria) ELSE NULL END,
+            COALESCE(a.side_effects, {sql['empty_arr']}),
+            CASE WHEN a.side_effects IS NOT NULL AND {text('a.side_effects')} <> '[]'
+                 THEN {sql['obj']}('items', a.side_effects) ELSE NULL END,
+            CASE WHEN a.rules IS NOT NULL AND {text('a.rules')} <> '[]'
+                 THEN {sql['obj']}('rules', a.rules) ELSE NULL END,
             a.enabled, COALESCE(NULLIF(a.status, ''), 'draft'),
             1, a.created_at, a.updated_at
         FROM actions a

@@ -23,6 +23,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # The trigger function only exists on PostgreSQL (0006).
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute(
         """
         CREATE OR REPLACE FUNCTION emit_agent_index_outbox() RETURNS trigger
@@ -83,6 +86,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The trigger function only exists on PostgreSQL (0006).
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute(
         """
         CREATE OR REPLACE FUNCTION emit_agent_index_outbox() RETURNS trigger
