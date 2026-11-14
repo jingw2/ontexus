@@ -37,7 +37,8 @@ duckdb==1.2.0
 minio==7.2.12
 pymongo==4.10.1
 pyarrow==18.1.0
-pandas>=2.2
+# pandas 3.1 needs sqlalchemy>=2.0.42 and silently treats older engines as sqlite
+pandas>=2.2,<3.1
 python-crontab==3.2.0
 rapidfuzz==3.10.1
 
