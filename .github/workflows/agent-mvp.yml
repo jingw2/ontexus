@@ -258,6 +258,11 @@ jobs:
         # just 3.12. Started once here for the whole job and torn down once
         # at the very end (see "Stop runtime Postgres/MySQL fixtures" below).
         run: docker compose -f test_data/runtime/db/docker-compose.yml up -d --wait
+      # document_service converts legacy .doc/.ppt through headless soffice.
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libreoffice-writer libreoffice-impress
       - name: Backend core suites
         env:
           # See "Start runtime Postgres/MySQL fixtures" above: this plain
