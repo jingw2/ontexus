@@ -319,6 +319,8 @@ jobs:
       - name: Validate application Compose definitions
         if: matrix.python-version == '3.12'
         run: |
+          # env_file: .env is required and git-ignored; validate against the template
+          cp .env.example .env
           docker compose -f docker-compose.v2.yml config --quiet
           docker compose -f docker-compose.agent.yml config --quiet
       - name: Agent evaluation corpus
