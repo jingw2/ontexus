@@ -156,7 +156,7 @@ def test_real_pgcrypto_absent_revoked_and_owner_bootstrap_are_isolated():
         result_0002 = subprocess.run(
             [sys.executable, "scripts/run_migrations.py", "upgrade", "0002_entity_identifiers"],
             cwd=BACKEND_DIR,
-            env=dict(os.environ, DATABASE_URL=str(database_url)),
+            env=dict(os.environ, DATABASE_URL=database_url.render_as_string(hide_password=False)),
             capture_output=True,
             text=True,
         )
@@ -164,7 +164,7 @@ def test_real_pgcrypto_absent_revoked_and_owner_bootstrap_are_isolated():
         result_0003 = subprocess.run(
             [sys.executable, "scripts/run_migrations.py", "upgrade", "0003_publication_governance"],
             cwd=BACKEND_DIR,
-            env=dict(os.environ, DATABASE_URL=str(database_url)),
+            env=dict(os.environ, DATABASE_URL=database_url.render_as_string(hide_password=False)),
             capture_output=True,
             text=True,
         )
@@ -181,7 +181,7 @@ def test_real_pgcrypto_absent_revoked_and_owner_bootstrap_are_isolated():
         result_revoked = subprocess.run(
             [sys.executable, "scripts/run_migrations.py", "upgrade", "0003_publication_governance"],
             cwd=BACKEND_DIR,
-            env=dict(os.environ, DATABASE_URL=str(database_url)),
+            env=dict(os.environ, DATABASE_URL=database_url.render_as_string(hide_password=False)),
             capture_output=True,
             text=True,
         )
@@ -196,7 +196,7 @@ def test_real_pgcrypto_absent_revoked_and_owner_bootstrap_are_isolated():
         result_success = subprocess.run(
             [sys.executable, "scripts/run_migrations.py", "upgrade", "0003_publication_governance"],
             cwd=BACKEND_DIR,
-            env=dict(os.environ, DATABASE_URL=str(database_url)),
+            env=dict(os.environ, DATABASE_URL=database_url.render_as_string(hide_password=False)),
             capture_output=True,
             text=True,
         )

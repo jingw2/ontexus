@@ -14,7 +14,8 @@ def make_mock_driver():
 
 def test_neo4j_service_available_on_connect():
     """Neo4j 연결 성공 시 available=True"""
-    with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_gdb:
+    with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_gdb, \
+            patch("app.services.v2.graph.neo4j_service._port_open", return_value=True):
         mock_driver, _ = make_mock_driver()
         mock_gdb.driver.return_value = mock_driver
 
