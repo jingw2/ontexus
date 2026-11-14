@@ -24,7 +24,7 @@ jobs:
         run: |
           cd backend
           set +e
-          uv run --python "3.10" python scripts/guarded_entrypoint.py -- \
+          uv run --no-project --python "3.10" python scripts/guarded_entrypoint.py -- \
             python -c "print('SHOULD_NOT_RUN')" > /tmp/negative.txt 2>&1
           code=$?
           set -e
@@ -49,6 +49,9 @@ jobs:
       - name: Frontend test:ci
         working-directory: frontend
         run: npm ci && npm run test:ci
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
       # NOTE (2026-08-31 fix wave, Item 6): all three tests in this spec
       # unconditionally `test.skip()` — this job starts no backend and sets
       # no `AGENT_E2E_RUNTIME_*` seed env vars, so this step always exits
@@ -212,7 +215,10 @@ jobs:
       - name: Migration through the guard
         run: |
           cd backend
-          TEST_DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
+          # Compose mounts this as an initdb script; the CI service can't.
+          psql postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
+            -v ON_ERROR_STOP=1 -f scripts/postgres-initdb/01-pgcrypto.sql
+          DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
             python scripts/run_migrations.py upgrade head
       - name: API smoke through the guarded launcher
         run: |
