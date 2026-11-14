@@ -36,7 +36,7 @@ jobs:
           fi
 
   frontend-ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Playwright 1.60 has no ubuntu 26.04 build
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -101,7 +101,7 @@ jobs:
   # any dependency install or model call could happen.
   business-journey-real-gate:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Playwright 1.60 has no ubuntu 26.04 build
     steps:
       - uses: actions/checkout@v4
       - name: Require a trusted, same-repository pull request
@@ -223,7 +223,7 @@ jobs:
       - name: API smoke through the guarded launcher
         run: |
           cd backend
-          TEST_DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
+          DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
             REDIS_URL=redis://localhost:6379/0 \
             python scripts/guarded_entrypoint.py -- python -m uvicorn app.main:app \
               --host 127.0.0.1 --port 8000 &
@@ -241,7 +241,7 @@ jobs:
           # Task 6A: bind the real named-queue topology (not just the
           # default queue) so a live worker startup proves every queue name
           # is valid, not only the static Compose/Python assertions.
-          TEST_DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
+          DATABASE_URL=postgresql://ontexus:ontexus@localhost:5432/ontexus_test \
             REDIS_URL=redis://localhost:6379/0 \
             timeout 25 python scripts/guarded_entrypoint.py -- python -m celery \
               -A app.tasks.celery_app worker --loglevel=warning --concurrency=1 \
